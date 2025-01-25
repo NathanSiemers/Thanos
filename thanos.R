@@ -16,28 +16,22 @@ DynamicFilterModuleServer <- function(id, data, plot_width = 600, plot_height = 
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
     # Reactive to store the selected variables for filtering
-    ##selected_vars <- reactiveVal(if (is.null(defaultFilter)) names(data) else defaultFilter)
     selected_vars <- reactiveVal(if (is.null(defaultFilter)) get_colnames(data) else defaultFilter)
-    print("Initial value of selected_vars:")
-    observe({
-      print("Accessing selected_vars in observe:")
-      print(selected_vars())
-    })
     # Reactive to fetch column names dynamically
     available_columns <- reactive({
       get_colnames(data)
     })
     # Reactive to store NA inclusion for each variable
+    # might not need it if we use initialized_vars
     include_na <- reactiveValues()
-    output$variable_selector <- renderUI({
-      selectizeInput(ns("select_vars"),
-                     label = "Select Variables for Filtering",
-                     choices = available_columns(),
-                     selected = selected_vars(),
-                     multiple = TRUE,
-                     options = list(placeholder = "Select variables..."))
-    })
-    # Reactive to fetch selected columns
+    # Init Reactive to store state of all filters
+    initialized_vars <- reactiveValues(
+      sliders = list(),
+      checkboxes = list(),
+      plots = list(),
+      nas = list()  # Track NA checkboxes
+    )
+    # Reactive function to fetch selected columns
     filtered_columns <- reactive({
       req(input$select_vars)
       get_variables(data, input$select_vars)
@@ -48,19 +42,24 @@ DynamicFilterModuleServer <- function(id, data, plot_width = 600, plot_height = 
       selected_vars(input$select_vars)
     }, ignoreNULL = TRUE, ignoreInit = TRUE)
     
+    # Output: variable selector
+    output$variable_selector <- renderUI({
+      selectizeInput(ns("select_vars"),
+                     label = "Select Variables for Filtering",
+                     choices = available_columns(),
+                     selected = selected_vars(),
+                     multiple = TRUE,
+                     options = list(placeholder = "Select variables..."))
+    })
     # Reactive to generate dynamic UI based on the selected variables
     output$dynamic_filters <- renderUI({
-      print('output$dynamic_filters <- renderUI({...')
       req(selected_vars())
       vars <- selected_vars()
-      print(vars)
       df <- get_variables(data, selected_vars())
-      print(dim(df))
-      
       # Generate filters, plots, reset buttons, and NA checkboxes dynamically for each selected column
       filter_ui <- lapply(selected_vars(), function(col) {
         print("In filter_ui")
-        df = get_variables(data, selected_vars())
+        ##df = get_variables(data, selected_vars())
         tagList(
           if (is.numeric(df[[col]])) {
             tagList(

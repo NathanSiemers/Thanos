@@ -29,14 +29,6 @@ server <- function(input, output, session) {
         showTable = TRUE,  # We'll use a custom table display
         download = TRUE
     )
-    # Debugging filter_module structure
-    ##  print(class(filter_module))            # Should print "list"
-    ##  print(names(filter_module))            # Should include "get_filtered_data" and "get_filtered_data_table"
-    # Debugging the module return values
-    ## observe({
-    ##   print(class(filter_module$get_filtered_data_table))  # Should print "function"
-    ##   print(class(filter_module$get_filtered_data))       # Should print "function"
-    ## })
     # Use get_filtered_data to process or display filtered data
     output$custom_filtered_table <- DT::renderDataTable({
         filter_module$get_filtered_data_table()
@@ -50,27 +42,15 @@ server <- function(input, output, session) {
     # Generate the scatter plot dynamically
     output$scatter_plot <- renderPlot({
         req(input$select_x, input$select_y)  # Ensure X and Y are selected
-        # Debugging: Print selected X and Y variables
-        print(paste("Selected X:", input$select_x))
-        print(paste("Selected Y:", input$select_y))
-        
         # Fetch filtered vector and plot data
         filtered_vector <- filter_module$filtered_vector()  # Get the logical vector
-        print(paste("Filtered vector length:", length(filtered_vector)))
-        
         plot_data <- get_variables(storms, c(input$select_x, input$select_y))  # Fetch only required columns
-        print(dim(plot_data))
-        print(head(plot_data))  # Debug: Print fetched data
-        
         plot_data <- plot_data[filtered_vector, , drop = FALSE]  # Subset using the logical vector
-        print(head(plot_data))  # Debug: Print subsetted data
-        
         # Check for issues in plot_data
         if (nrow(plot_data) == 0) {
             print("No data to plot!")
             return(NULL)  # Avoid plotting if no data is available
         }
-        
         # Generate the plot
         ggplot(plot_data, aes_string(x = input$select_x, y = input$select_y)) +
             geom_point() +
@@ -81,14 +61,13 @@ server <- function(input, output, session) {
                 y = input$select_y
             )
     })
-
 }
 
 ui <- fluidPage(
     titlePanel("Thanos: interactive data filtering in R/shiny"),
     sidebarLayout(
         sidebarPanel(
-            DynamicFilterModuleUI("filterModule"),  # Dynamic filter module UI
+            DynamicFilterModuleUI("filterModule"),  
             ),
         mainPanel(
             selectInput("select_x", "Select X Axis:", choices = NULL),
