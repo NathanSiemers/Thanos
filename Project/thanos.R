@@ -1,4 +1,4 @@
-## Module for dynamic filter functionality
+### Module for dynamic filter functionality
 DynamicFilterModuleUI <- function(id) {
   ns <- NS(id)
   tagList(
