@@ -1,15 +1,13 @@
-##
 library(shiny)
 library(dplyr)
 library(ggplot2)
 
-source("thanos.R")
-
-`%||%` <- function(x, y) {
-  if (!is.null(x)) x else y
-}
+source("thanos.R")  # now (like?) a module with it's own namespace
 
 # Simulated database functions for large datasets
+# define a get (all) possible column names of table
+# and retrieve one or more specific columns by name
+# we are using the storms data set from dplyr as an example
 get_colnames <- function(data) {
     # Fetch column names (simulate external database interaction)
     ## ignore "data
@@ -21,8 +19,6 @@ get_variables <- function(data, columns) {
     # ignore "data"
     storms[, columns, drop = FALSE]
 }
-
-
 
 server <- function(input, output, session) {
     # Initialize the dynamic filter module
@@ -47,8 +43,8 @@ server <- function(input, output, session) {
     })
     # Populate X and Y selectInput choices with column names
     observe({
-        updateSelectInput(session, "select_x", choices = names(storms),  selected = names(storms)[1])
-        updateSelectInput(session, "select_y", choices = names(storms),  selected = names(storms)[2])
+        updateSelectInput(session, "select_x", choices = get_colnames(storms),  selected = get_colnames(storms)[1])
+        updateSelectInput(session, "select_y", choices = get_colnames(storms),  selected = get_colnames(storms)[2])
     })
     
     # Generate the scatter plot dynamically
@@ -89,7 +85,7 @@ server <- function(input, output, session) {
 }
 
 ui <- fluidPage(
-    titlePanel("Dynamic Filter Shiny Module"),
+    titlePanel("Thanos: interactive data filtering in R/shiny"),
     sidebarLayout(
         sidebarPanel(
             DynamicFilterModuleUI("filterModule"),  # Dynamic filter module UI

@@ -1,4 +1,4 @@
-## Module for dynamic filter functionality
+### Module for dynamic filter functionality
 DynamicFilterModuleUI <- function(id) {
   ns <- NS(id)
   tagList(
@@ -132,7 +132,9 @@ DynamicFilterModuleServer <- function(id, data, plot_width = 600, plot_height = 
       df <- get_variables(data, selected_vars())
       vars <- selected_vars()
       filter_vector <- rep(TRUE, nrow(df))  # Start with all rows included
-      
+      `%||%` <- function(x, y) {
+        if (!is.null(x)) x else y
+      }
       for (col in vars) {
         filter_id <- paste0("filter_", col)
         include_na_flag <- input[[paste0("na_", col)]] %||% FALSE  # Default to FALSE
