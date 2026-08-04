@@ -15,6 +15,13 @@
 ##     $n_selected()     sum(mask())
 ##     $selected_vars()  currently selected column names
 ##     $filters()        named list of current filter values (save/restore)
+##     $add_vars(cols)   parent -> module: ensure these columns appear in
+##                       the filter selection (adds panels for any not
+##                       already selected; never removes; unknown column
+##                       names are ignored).  The one sanctioned way for
+##                       a parent app to drive the filter set -- e.g. a
+##                       grapher adding its plotted axes so their NAs and
+##                       ranges become user-controllable.
 ##
 ## Reactive architecture (why it is fast):
 ##   - each variable owns ONE debounced mask reactive; moving a slider
@@ -362,7 +369,21 @@ thanosServer <- function(id, backend,
             filters       = reactive({
                 fs <- filterState$filters
                 fs[intersect(names(fs), varsNow())]
-            })
+            }),
+            ## parent -> module: add columns to the filter selection.
+            ## Purely additive and idempotent; the update round-trips
+            ## through the selectize, so panels appear via the normal
+            ## add_var path and the user can still remove them by hand.
+            add_vars      = function(cols) {
+                cols <- intersect(cols, all_columns)
+                want <- union(isolate(varsNow()), cols)
+                if (!setequal(want, isolate(varsNow()))) {
+                    updateSelectizeInput(session, "vars",
+                                         choices = all_columns,
+                                         selected = want, server = TRUE)
+                }
+                invisible(want)
+            }
         )
     })
 }

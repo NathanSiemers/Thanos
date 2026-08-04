@@ -146,3 +146,8 @@ server <- function(input, output, session) {
 
 The module never hands your app a filtered copy of the data; it hands
 you `rows()` (or `mask()`), and you subset whatever you need yourself.
+
+One optional call flows the other way: `th$add_vars(cols)` asks Thanos
+to include columns in its filter selection (additive, idempotent) —
+the grapher uses it to keep its plotted axes filterable, so their NAs
+and ranges are always user-controllable.

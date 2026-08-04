@@ -55,4 +55,20 @@ testServer(parent_server, {
           isTRUE(all(plot_data_out()$a >= 25 & plot_data_out()$a <= 75)))
 })
 
+## add_vars(): the one parent->module call. In testServer there is no
+## client to round-trip the selectize update, so we verify the request
+## logic directly and then simulate the client echoing it back.
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0), {
+    session$setInputs(vars = "a")
+    want <- session$getReturned()$add_vars(c("g", "nonexistent_column"))
+    check("add_vars unions with current selection, drops unknown names",
+          setequal(want, c("a", "g")))
+    session$setInputs(vars = want)   # the client echo
+    check("added column participates in filtering after round trip",
+          setequal(session$returned$selected_vars(), c("a", "g")))
+    check("add_vars is idempotent",
+          setequal(session$getReturned()$add_vars("g"), c("a", "g")))
+})
+
 cat("\nall grapher embedding tests passed\n")

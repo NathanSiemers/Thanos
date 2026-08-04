@@ -3,22 +3,27 @@
 ##
 ## This app is the INTEGRATION REFERENCE.  It is a self-standing
 ## scatter-plot application (pick x, y, color, size, draw points) that
-## acquired filtering by adding Thanos at exactly FOUR points, each
-## marked with a "PLUG-IN POINT" banner below:
+## acquired filtering by adding Thanos at FOUR required points plus one
+## optional one, each marked with a "PLUG-IN POINT" banner below:
 ##
-##   1. source the Thanos R/ files            (once, at startup)
+##   1. source the Thanos loader              (once, at startup)
 ##   2. create a backend around your data     (once, at startup)
 ##   3. thanosUI("<id>")   somewhere in ui    (one line)
 ##   4. thanosServer("<id>", backend, ...) in server(), keeping its
 ##      return value                          (one line)
+##   5. OPTIONAL, parent -> module: th$add_vars(cols) to push columns
+##      into the filter selection (here: the plotted axes, so their
+##      NAs and ranges are always user-controllable)
 ##
 ## HOW THE TWO APPS INTERACT after that -- the whole contract:
 ##
-##   parent app  ------ nothing ------>  Thanos
-##   parent app  <---- reactives ----- Thanos
+##   parent app  -- add_vars(cols) only, optional -->  Thanos
+##   parent app  <-------- reactives ---------------- Thanos
 ##
 ##   Thanos never calls into your app, never modifies your data, and
-##   never hands you a filtered copy of anything.  It returns a list of
+##   never hands you a filtered copy of anything.  The single sanctioned
+##   parent->module call is th$add_vars(cols) (see PLUG-IN POINT 5).
+##   Everything else flows the other way: Thanos returns a list of
 ##   REACTIVES, and you read the ones you want inside your own
 ##   reactive()/renderPlot()/renderTable() code:
 ##
@@ -30,6 +35,9 @@
 ##     th$selected_vars() which columns the user is filtering on
 ##     th$filters()       the current filter settings, in raw units
 ##                        (save/restore, bookmarking, audit)
+##     th$add_vars(cols)  parent -> module: ensure these columns have
+##                        filter panels (additive, idempotent, unknown
+##                        names ignored)
 ##
 ##   Because these are reactives, Shiny does the wiring: any output of
 ##   yours that reads th$rows() re-renders automatically when the user
@@ -145,6 +153,39 @@ server <- function(input, output, session) {
     th <- thanosServer("thanos", backend,
                        default_selected = c("carrier", "origin",
                                             "dep_delay", "distance"))
+
+    ############################################################
+    ## PLUG-IN POINT 5 (OPTIONAL): parent -> module, the ONLY
+    ## message that ever flows in that direction.
+    ##
+    ## th$add_vars(cols) asks Thanos to include those columns in its
+    ## "Filter columns" selection, exactly as if the user had picked
+    ## them: panels appear through the module's normal path, with
+    ## their include-NA checkboxes, sliders/checkboxes, and
+    ## histograms.
+    ##
+    ## WHY the grapher does this: the columns this app PLOTS are not
+    ## automatically columns Thanos FILTERS.  Without this, a y axis
+    ## like arr_delay can carry NAs (cancelled flights) that pass the
+    ## filters untouched -- correct, but invisible until ggplot drops
+    ## them.  By adding the plotted axes to the filter set, the user
+    ## always has that column's include-NA checkbox and range slider
+    ## in front of them, so 'why are rows missing from my plot?' has
+    ## a visible, adjustable answer.
+    ##
+    ## Behavior notes an integrator should know:
+    ##   - add_vars() only ADDS, and is idempotent: nothing happens
+    ##     if the columns are already selected.
+    ##   - the user keeps full control: they can remove the panel
+    ##     again; it will only come back if the axis CHANGES (this
+    ##     observer fires on input$x/input$y changes, not on the
+    ##     module's own selection changes -- no tug-of-war loop).
+    ##   - unknown column names are ignored, so it is safe to pass
+    ##     UI state through directly.
+    ############################################################
+    observeEvent(c(input$x, input$y), {
+        th$add_vars(c(input$x, input$y))
+    })
 
     ############################################################
     ## INTERACTION, part 1: consume the row pointer.
