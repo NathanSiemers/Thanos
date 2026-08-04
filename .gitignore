@@ -1,0 +1,14 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+token
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+db/data/
+*~
+\#*\#
+package.json
+package-lock.json
+node_modules/
