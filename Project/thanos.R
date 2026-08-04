@@ -1,314 +1,250 @@
-### Module for dynamic filter functionality
-DynamicFilterModuleUI <- function(id) {
+library(shiny)
+library(ggplot2)
+
+###########################################
+# 1) The Module UI
+###########################################
+dynamicFilterModuleUI <- function(id) {
   ns <- NS(id)
-  tagList(
-    uiOutput(ns("variable_selector")), # Variable selector
-    uiOutput(ns("dynamic_filters")),   # Placeholder for dynamic filters and plots
-    conditionalPanel(
-      condition = sprintf("input.%s_showTable == true", ns("")),
-      DT::dataTableOutput(ns("filtered_table")), # Table to show filtered data
-      uiOutput(ns("download_ui")) # Download UI
-    )
+  
+  fluidPage(
+    # A selectize input to pick columns from the dataset
+    fluidRow(
+      column(
+        12,
+        selectizeInput(
+          inputId = ns("vars"),
+          label   = "Select columns:",
+          choices = NULL,   # We'll populate these in the server
+          multiple = TRUE
+        )
+      )
+    ),
+    
+    # Dynamically generated filters & plots
+    uiOutput(ns("varPanels"))
   )
 }
 
-DynamicFilterModuleServer <- function(id, data, plot_width = 600, plot_height = 150, defaultFilter = NULL, showTable = TRUE, download = FALSE) {
+###########################################
+# 2) The Module Server
+###########################################
+dynamicFilterModuleServer <- function(id,
+                                      get_data,
+                                      get_columns,
+                                      default_selected = NULL) {
+  # get_data(selectedCols) -> returns a data.frame with *all rows* but *only* the columns in selectedCols
+  # get_columns() -> returns a vector of all possible column names
+  
   moduleServer(id, function(input, output, session) {
     ns <- session$ns
-    # Reactive to store the selected variables for filtering
-    ##selected_vars <- reactiveVal(if (is.null(defaultFilter)) names(data) else defaultFilter)
-    selected_vars <- reactiveVal(if (is.null(defaultFilter)) get_colnames(data) else defaultFilter)
-    print("Initial value of selected_vars:")
+    
+    # A reactiveValues store for the user’s filter settings:
+    # e.g., rv$filters[["Sepal.Length"]] = c(4.3,7.9) or rv$filters[["Species"]] = c("setosa","virginica")
+    rv <- reactiveValues(filters = list())
+    
+    # 2.1) Populate the selectizeInput with all possible columns
     observe({
-      print("Accessing selected_vars in observe:")
-      print(selected_vars())
-    })
-    # Reactive to fetch column names dynamically
-    available_columns <- reactive({
-      get_colnames(data)
-    })
-    # Reactive to store NA inclusion for each variable
-    include_na <- reactiveValues()
-    output$variable_selector <- renderUI({
-      selectizeInput(ns("select_vars"),
-                     label = "Select Variables for Filtering",
-                     choices = available_columns(),
-                     selected = selected_vars(),
-                     multiple = TRUE,
-                     options = list(placeholder = "Select variables..."))
-    })
-    # Reactive to fetch selected columns
-    filtered_columns <- reactive({
-      req(input$select_vars)
-      get_variables(data, input$select_vars)
-    })
-    
-    # Reactive to update the selected variables
-    observeEvent(input$select_vars, {
-      selected_vars(input$select_vars)
-    }, ignoreNULL = TRUE, ignoreInit = TRUE)
-    
-    # Reactive to generate dynamic UI based on the selected variables
-    output$dynamic_filters <- renderUI({
-      print('output$dynamic_filters <- renderUI({...')
-      req(selected_vars())
-      vars <- selected_vars()
-      print(vars)
-      df <- get_variables(data, selected_vars())
-      print(dim(df))
-      
-      # Generate filters, plots, reset buttons, and NA checkboxes dynamically for each selected column
-      filter_ui <- lapply(selected_vars(), function(col) {
-        print("In filter_ui")
-        df = get_variables(data, selected_vars())
-        tagList(
-          if (is.numeric(df[[col]])) {
-            tagList(
-              sliderInput(ns(paste0("filter_", col)),
-                          label = paste("Filter", col),
-                          min = min(df[[col]], na.rm = TRUE),
-                          max = max(df[[col]], na.rm = TRUE),
-                          value = c(min(df[[col]], na.rm = TRUE), max(df[[col]], na.rm = TRUE))
-              ),
-              checkboxInput(ns(paste0("na_", col)),
-                            label = paste0("Include NAs (", sum(is.na(df[[col]])), ")"), 
-                            value = TRUE)
-            )
-          } else if (is.factor(df[[col]]) || is.character(df[[col]])) {
-            tagList(
-              checkboxGroupInput(ns(paste0("filter_", col)),
-                                 label = paste("Filter", col),
-                                 choices = unique(df[[col]]),
-                                 selected = unique(df[[col]])),
-              checkboxInput(ns(paste0("na_", col)),
-                            label = paste0("Include NAs (", sum(is.na(df[[col]])), ")"),
-                            value = TRUE),
-              actionButton(ns(paste0("action_", col)), label = "All/None")
-            )
-          },
-          print("we are supposed to be plotting with plotOutput"),
-          print(col),
-          print(ns(paste0("plot_", col))),
-          plotOutput(ns(paste0("plot_", col)), height = paste0(plot_height, "px"), width = paste0(plot_width, "px"))
-        )
-      })
-      do.call(tagList, filter_ui)
-    })
-    
-    # Observe reset button actions and NA inclusion changes for categorical variables
-    observe({
-      req(selected_vars())
-      ##df <- data
-      vars <- selected_vars()
-      print("in reset code")
-      print(vars)
-      df <- get_variables(data, vars)
-      lapply(vars, function(col) {
-        observeEvent(input[[paste0("action_", col)]], {
-          if (is.factor(df[[col]]) || is.character(df[[col]])) {
-            act <- input[[paste0("action_", col)]]
-            allchoices <- sort(unique(df[[col]]))
-            if (is.null(act)) {
-              act <- 0
-            }
-            if (as.numeric(act) %% 2 == 0) {
-              updateCheckboxGroupInput(session, ns(paste0("filter_", col)), label = paste("Filter", col), choices = allchoices, selected = allchoices, inline = TRUE)
-            } else {
-              updateCheckboxGroupInput(session, ns(paste0("filter_", col)), label = paste("Filter", col), choices = allchoices, selected = character(0), inline = TRUE)
-            }
-          }
-        }, ignoreInit = TRUE)
-        
-        # Track NA inclusion
-        observeEvent(input[[paste0("na_", col)]], {
-          include_na[[col]] <- input[[paste0("na_", col)]]
-        }, ignoreInit = TRUE)
-      })
-    })
-    
-    
-    filtered_vector <- reactive({
-      req(data, selected_vars())
-      df <- get_variables(data, selected_vars())
-      vars <- selected_vars()
-      filter_vector <- rep(TRUE, nrow(df))  # Start with all rows included
-      `%||%` <- function(x, y) {
-        if (!is.null(x)) x else y
+      cols <- get_columns()  # user-provided function returning vector of column names
+      # Filter default_selected so we only select columns that actually exist
+      if (!is.null(default_selected)) {
+        default_sel <- intersect(default_selected, cols)
+      } else {
+        default_sel <- character(0)
       }
-      for (col in vars) {
-        filter_id <- paste0("filter_", col)
-        include_na_flag <- input[[paste0("na_", col)]] %||% FALSE  # Default to FALSE
+      
+      updateSelectizeInput(session, "vars",
+                           choices  = cols,
+                           selected = default_sel,
+                           server = TRUE
+      )
+      
+    })
+    
+    # 2.2) Whenever user *removes* a variable, clear out stored filter values
+    observeEvent(input$vars, {
+      oldVars <- names(rv$filters)
+      for (v in oldVars) {
+        if (!v %in% input$vars) {
+          rv$filters[[v]] <- NULL
+        }
+      }
+    })
+    
+    # 2.3) Keep track of user inputs for each filter in rv$filters
+    observe({
+      req(input$vars)
+      for (v in input$vars) {
+        filterId <- paste0("filter_", v)
+        curVal <- input[[filterId]]
+        if (!is.null(curVal)) {
+          rv$filters[[v]] <- curVal
+        }
+      }
+    })
+    
+    # 2.4) Build the dynamic UI for each selected variable:
+    #      one row with (filter UI) and (plot).
+    output$varPanels <- renderUI({
+      req(input$vars)
+      selectedVars <- input$vars
+      
+      # We'll fetch the data for just those columns (plus row index).
+      # For an actual DB, get_data(selectedVars) should return all rows but only the columns needed for filtering.
+      dfFilter <- get_data(selectedVars)
+      validate(
+        need(nrow(dfFilter) > 0, "No rows returned. Possibly an empty table?")
+      )
+      
+      # For each chosen variable, create (filter, plot)
+      theRows <- lapply(selectedVars, function(varName) {
+        columnData <- dfFilter[[varName]]
+        filterId   <- paste0("filter_", varName)
+        plotId     <- paste0("plot_", varName)
         
-        if (is.numeric(df[[col]]) && !is.null(input[[filter_id]])) {
-          # Debugging input values
-          print(paste("Filter values for", col, ":", input[[filter_id]]))
+        # For numeric columns: slider
+        if (is.numeric(columnData)) {
+          rng <- range(columnData, na.rm = TRUE)
+          range_diff <- rng[2] - rng[1]
           
-          range_filter <- between(
-            df[[col]],
-            left = input[[filter_id]][1],
-            right = input[[filter_id]][2]
+          step <- signif(range_diff / 100, digits = 1)
+          if (is.na(step) || step == 0) step <- 0.01
+          
+          min_val <- floor(rng[1] / step) * step
+          max_val <- ceiling(rng[2] / step) * step
+          
+          # If we already have a stored value for this var, use it; otherwise full range
+          storedVal <- rv$filters[[varName]]
+          if (is.null(storedVal)) {
+            storedVal <- c(min_val, max_val)
+          }
+          
+          filterUI <- sliderInput(
+            inputId = ns(filterId),
+            label   = paste("Filter", varName),
+            min     = min_val,
+            max     = max_val,
+            value   = storedVal,
+            step    = step
           )
           
-          if (include_na_flag) {
-            range_filter <- range_filter | is.na(df[[col]])
+        } else {
+          # For factor/character columns: checkboxes
+          levelsVec <- sort(unique(columnData))
+          storedVal <- rv$filters[[varName]]
+          if (is.null(storedVal)) {
+            storedVal <- levelsVec
           }
-          filter_vector <- filter_vector & range_filter
-        } else if ((is.factor(df[[col]]) || is.character(df[[col]])) && !is.null(input[[filter_id]])) {
-          value_filter <- df[[col]] %in% input[[filter_id]]
-          if (include_na_flag) {
-            value_filter <- value_filter | is.na(df[[col]])
-          }
-          filter_vector <- filter_vector & value_filter
+          
+          filterUI <- checkboxGroupInput(
+            inputId  = ns(filterId),
+            label    = paste("Filter", varName),
+            choices  = levelsVec,
+            selected = storedVal
+          )
         }
-      }
-      
-      print("Final filtered vector:")
-      print(table(filter_vector))
-      filter_vector
-    })
-    
-    ## filtered_vector <- reactive({
-    ##     req(data, selected_vars())
-    ##     print("Calculating filtered vector...")
-    
-    ##     # Fetch the selected columns
-    ##     df <- get_variables(data, selected_vars())
-    ##     vars <- selected_vars()
-    
-    ##     # Initialize the vector as TRUE for all rows
-    ##     filter_vector <- rep(TRUE, nrow(df))
-    
-    ##     # Apply filters for each selected variable
-    ##     for (col in vars) {
-    ##         filter_id <- paste0("filter_", col)
-    ##         include_na_flag <- input[[paste0("na_", col)]] %||% FALSE  # Default to FALSE if NULL
-    
-    ##         if (is.numeric(df[[col]])) {
-    ##             range_filter <- between(df[[col]], input[[filter_id]][1], input[[filter_id]][2])
-    ##             if (include_na_flag) {
-    ##                 range_filter <- range_filter | is.na(df[[col]])
-    ##             }
-    ##             filter_vector <- filter_vector & range_filter
-    ##         } else if (is.factor(df[[col]]) || is.character(df[[col]])) {
-    ##             value_filter <- df[[col]] %in% input[[filter_id]]
-    ##             if (include_na_flag) {
-    ##                 value_filter <- value_filter | is.na(df[[col]])
-    ##             }
-    ##             filter_vector <- filter_vector & value_filter
-    ##         }
-    ##     }
-    
-    ##     print("Filtered vector calculated:")
-    ##     print(table(filter_vector))
-    ##     filter_vector
-    ## })
-    
-    filtered_data <- reactive({
-      req(filtered_vector())  # Ensure the logical vector is available
-      print("Subsetting data with filtered vector...")
-      
-      # Fetch all available columns
-      df <- get_variables(data, selected_vars())
-      print(paste("Original data dimensions:", dim(df)))
-      
-      # Subset using the logical vector
-      df <- df[filtered_vector(), , drop = FALSE]
-      print(paste("Filtered data dimensions:", dim(df)))
-      
-      df
-    })
-    
-    
-    
-    # Function to return the filtered data as a DT table
-    get_filtered_data_table <- function() {
-      DT::datatable(filtered_data())
-    }
-    
-    # Provide a download handler for filtered data if enabled
-    if (download) {
-      output$download_ui <- renderUI({
-        downloadButton(ns("download_data"), "Download Filtered Data")
+        
+        fluidRow(
+          column(3, filterUI),
+          column(9, plotOutput(ns(plotId), height = "100px"))
+        )
       })
       
-      output$download_data <- downloadHandler(
-        filename = function() {
-          paste("filtered_data", Sys.Date(), ".csv", sep = "")
-        },
-        content = function(file) {
-          write.csv(filtered_data(), file, row.names = FALSE)
-        }
-      )
-    } else {
-      output$download_ui <- renderUI({ NULL })
-    }
-    
-    # Render each plot dynamically
-    ##print("selected_vars is NULL or empty?")
-    ##print(is.null(selected_vars()))
-    ##print(selected_vars())
-    ##print(head(filtered_data()))
-    
-    observeEvent(input$select_vars, {
-      print("Updating selected_vars...")
-      selected_vars(input$select_vars)
+      do.call(tagList, theRows)
     })
     
+    # 2.5) Create a reactive that computes a TRUE/FALSE mask for *all rows* of the data,
+    #      using only the selected columns. The length of the mask = nrow(dfFilter).
+    #      Also produce a subset with just the selected columns, filtered.
+    #      We'll return both as separate reactives.
+    filterMask <- reactive({
+      selectedVars <- input$vars
+      dfFilter <- get_data(selectedVars)
+      n <- nrow(dfFilter)
+      if (n == 0) {
+        return(logical(0))
+      }
+      
+      # Start with all TRUE, then narrow down
+      keep <- rep(TRUE, n)
+      
+      for (varName in selectedVars) {
+        colData  <- dfFilter[[varName]]
+        filterVal <- rv$filters[[varName]]
+        if (is.null(filterVal)) {
+          next
+        }
+        
+        if (is.numeric(colData)) {
+          keep <- keep & (colData >= filterVal[1] & colData <= filterVal[2])
+        } else {
+          keep <- keep & (colData %in% filterVal)
+        }
+      }
+      keep
+    })
+    
+    filteredData <- reactive({
+      # Return only the selected columns
+      selectedVars <- input$vars
+      if (length(selectedVars) == 0) {
+        return(data.frame())
+      }
+      dfFilter <- get_data(selectedVars)
+      mask <- filterMask()
+      if (length(mask) == 0) {
+        return(dfFilter[FALSE, , drop = FALSE]) # empty
+      }
+      dfFilter[mask, , drop = FALSE]
+    })
+    
+    # 2.6) Dynamically render plots for each variable, using the *filteredData()*
     observe({
-      req(selected_vars(), filtered_data())
+      req(input$vars)
+      # Force reactivity on each filter
+      for (v in input$vars) {
+        input[[paste0("filter_", v)]]
+      }
       
-      vars <- selected_vars()
-      print("Generating plots for variables:")
-      print(vars)
-      
-      lapply(vars, function(col) {
-        output[[paste0("plot_", col)]] <- renderPlot({
-          req(filtered_data())
-          df <- filtered_data()
+      # for each var, create a renderPlot
+      for (varName in input$vars) {
+        local({
+          myVar <- varName
+          plotId <- paste0("plot_", myVar)
           
-          if (!col %in% names(df)) {
-            print(paste("Column", col, "not found in filtered data. Skipping."))
-            return(NULL)
-          }
-          
-          print(paste("Plotting column:", col))
-          if (is.numeric(df[[col]])) {
-            ggplot(df, aes(x = .data[[col]])) +
-              geom_histogram(fill = "blue", alpha = 0.8, bins = 30) +
-              theme_minimal()
-          } else if (is.factor(df[[col]]) || is.character(df[[col]])) {
-            ggplot(df, aes(x = .data[[col]])) +
-              geom_bar(fill = "blue", alpha = 0.8) +
-              theme_minimal()
-          }
+          output[[plotId]] <- renderPlot({
+            df <- filteredData()
+            if (nrow(df) == 0) {
+              plot.new()
+              text(0.5, 0.5, "No data after filtering")
+              return()
+            }
+            
+            if (is.numeric(df[[myVar]])) {
+              ggplot(df, aes(x = .data[[myVar]])) +
+                geom_histogram(bins = 100, fill = "darkblue", color = "white") +
+                labs(title = paste("Histogram of", myVar))
+            } else {
+              print(paste("non-numeric data:", myVar))
+              print(table(df[[myVar]]))
+              ggplot(df, aes(x = .data[[myVar]])) +
+                geom_bar(fill = "darkblue", color = "white") +
+                labs(title = paste("Bar Plot of", myVar))
+            }
+          })
         })
-      })
-    })
-    
-    observeEvent(input$select_vars, {
-      print("Updating selected_vars...")
-      print("Input$select_vars:")
-      print(input$select_vars)
-      selected_vars(input$select_vars)  # Update selected_vars
-      print("Updated selected_vars:")
-      print(selected_vars())
-    })
-    
-    
-    # Render filtered data table
-    output$filtered_table <- DT::renderDataTable({
-      req(filtered_data())
-      if (showTable) {
-        DT::datatable(filtered_data())
       }
     })
     
-    
-    # Ensure the correct list of functions is returned
-    return(list(
-      filtered_data = filtered_data,
-      filtered_vector = filtered_vector,
-      get_filtered_data_table = get_filtered_data_table
-    ))
+    # 2.7) Return a list of functions so the parent app can retrieve the mask and filtered data
+    list(
+      getFilterMask = function() {
+        filterMask()
+      },
+      getFilteredData = function() {
+        filteredData()
+      }
+    )
   })
 }
+
