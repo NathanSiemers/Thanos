@@ -110,6 +110,13 @@ Rscript bench/bench_big.R            # sqlite vs duckdb (taxi, 38M rows)
 
 ## Embedding Thanos in your own app
 
+**The fully annotated integration reference is `apps/grapher/app.R`** —
+an independent scatter-plot app that acquired Thanos filtering at four
+marked "PLUG-IN POINT" comments (source the code → wrap your data in a
+backend → `thanosUI()` in the layout → `thanosServer()` in the server),
+with the parent/module interaction contract documented inline. Short
+version:
+
 ```r
 invisible(lapply(list.files("R", pattern = "[.]R$", full.names = TRUE), source))
 
