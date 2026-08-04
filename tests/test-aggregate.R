@@ -59,8 +59,10 @@ check("empty categorical selection keeps only NA rows",
                                  include_na = TRUE))) == sum(is.na(df$g)))
 
 ## binned counts: SQL GROUP BY vs R tabulate over the same fixed breaks
-spec_a <- bin_spec_from_info(be$get_column_info("a"), bins = 25)
-bin_a  <- bin_column(df$a, bins = 25)
+## (both sides use the outlier-robust display range, like the module)
+info_a <- be$get_column_info("a")
+spec_a <- bin_spec_from_info(info_a, bins = 25)
+bin_a  <- bin_column(df$a, bins = 25, range = display_range(info_a))
 loo_f  <- filters[c("b", "g")]
 loo_m  <- m_b & m_g
 check("numeric binned counts match tabulate (leave-one-out set)",
@@ -95,11 +97,29 @@ check("discrete numeric binned counts match tabulate",
                        as.numeric(tabulate(bin_m$idx[m_a],
                                            nbins = bin_m$nbins)))))
 
+## combined shown+sel query equals two independent computations
+pair <- be$get_binned_pair("a", spec_a, loo_f,
+                           list(val = c(20, 80), include_na = TRUE))
+check("get_binned_pair shown matches loo tabulate",
+      isTRUE(all.equal(pair$shown,
+                       as.numeric(tabulate(bin_a$idx[loo_m], nbins = 25)))))
+check("get_binned_pair sel matches all-filters tabulate",
+      isTRUE(all.equal(pair$sel,
+                       as.numeric(tabulate(bin_a$idx[all_m], nbins = 25)))))
+
+## slider endpoints mean unbounded: infinite bounds drop the condition
+check("infinite bounds impose no numeric filter",
+      be$get_count(list(a = list(is_numeric = TRUE, val = c(-Inf, Inf),
+                                 include_na = TRUE))) == nrow(df))
+check("half-open range works (a >= 50, no upper bound)",
+      be$get_count(list(a = list(is_numeric = TRUE, val = c(50, Inf),
+                                 include_na = TRUE))) == sum(df$a >= 50))
+
 ## whole-module equivalence: aggregate vs vector mode, same inputs
 run_module <- function(backend, mode) {
     out <- new.env()
     testServer(thanosServer,
-               args = list(backend = backend, debounce_ms = 0, mode = mode), {
+               args = list(backend = backend, debounce_ms = 0, debounce_checkbox_ms = 0, mode = mode), {
         session$setInputs(vars = c("a", "g"))
         session$setInputs(filter_a = c(20, 80), filter_g = c("p", "q"))
         out$n <- session$returned$n_selected()
@@ -114,5 +134,26 @@ check("module n_selected identical in aggregate and vector modes",
 check("module rows() identical in aggregate and vector modes",
       identical(agg$rows, vec$rows))
 
+## log2(x+1) SQL binning: RSQLite lacks log2(), so this path is verified
+## against DuckDB over the same tall/skinny fixture
+check("sqlite backend reports missing log2 support",
+      isFALSE(be$supports_log2))
+if (requireNamespace("duckdb", quietly = TRUE)) {
+    scon <- dbConnect(RSQLite::SQLite(), db_path)
+    dcon <- dbConnect(duckdb::duckdb())
+    dbWriteTable(dcon, "long_data", dbReadTable(scon, "long_data"))
+    dbWriteTable(dcon, "column_registry", dbReadTable(scon, "column_registry"))
+    dbDisconnect(scon)
+    bd <- backend_dbi(dcon)
+    check("duckdb backend reports log2 support", isTRUE(bd$supports_log2))
+    spec_log <- bin_spec_from_info(info_a, bins = 25, log2p1 = TRUE)
+    bin_log  <- bin_column(df$a, bins = 25,
+                           range = display_range(info_a), log2p1 = TRUE)
+    check("log2-transformed binned counts match tabulate (duckdb)",
+          isTRUE(all.equal(bd$get_binned("a", spec_log, loo_f),
+                           as.numeric(tabulate(bin_log$idx[loo_m],
+                                               nbins = 25)))))
+    bd$disconnect()
+}
 be$disconnect()
 cat("\nall aggregate-mode tests passed\n")

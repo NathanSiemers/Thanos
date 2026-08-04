@@ -71,11 +71,13 @@ run("CREATE TABLE column_registry (
         column_name TEXT PRIMARY KEY, type TEXT NOT NULL,
         n_rows INTEGER NOT NULL, n_na INTEGER NOT NULL,
         min_val REAL, max_val REAL, is_integerish INTEGER,
-        n_unique INTEGER, levels_json TEXT)")
+        n_unique INTEGER, q_low REAL, q_high REAL, levels_json TEXT)")
 for (col in NUM_COLS) {
     s <- dbGetQuery(con, sprintf(
         "SELECT COUNT(*) AS n_present, MIN(value_num) AS mn,
-                MAX(value_num) AS mx, COUNT(DISTINCT value_num) AS nu
+                MAX(value_num) AS mx, COUNT(DISTINCT value_num) AS nu,
+                quantile_cont(value_num, 0.001) AS ql,
+                quantile_cont(value_num, 0.999) AS qh
          FROM long_data WHERE column_name = '%s'", col))
     ## few distinct values -> keep them so the module can offer checkboxes
     levels_json <- if (s$nu > 0 && s$nu <= 100) {
@@ -88,6 +90,7 @@ for (col in NUM_COLS) {
         data.frame(column_name = col, type = "numeric", n_rows = n,
                    n_na = n - s$n_present, min_val = s$mn, max_val = s$mx,
                    is_integerish = NA_integer_, n_unique = s$nu,
+                   q_low = s$ql, q_high = s$qh,
                    levels_json = levels_json))
 }
 for (col in TXT_COLS) {
@@ -104,6 +107,7 @@ for (col in TXT_COLS) {
                    n_na = n - n_present, min_val = NA_real_,
                    max_val = NA_real_, is_integerish = NA_integer_,
                    n_unique = length(levs),
+                   q_low = NA_real_, q_high = NA_real_,
                    levels_json = as.character(jsonlite::toJSON(levs))))
 }
 run(sprintf("CREATE TABLE row_universe AS

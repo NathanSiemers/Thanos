@@ -26,7 +26,7 @@ backend <- backend_memory(df)
 
 ## max_discrete_numeric = 0 keeps the 5-unique-value 'num' column on a
 ## slider so these blocks exercise classic range semantics
-testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0, debounce_checkbox_ms = 0,
                                      max_discrete_numeric = 0), {
     ## select two variables
     session$setInputs(vars = c("num", "cat"))
@@ -83,7 +83,7 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
 
 ## opt-in: remember_removed = TRUE restores settings on re-add
 testServer(thanosServer,
-           args = list(backend = backend, debounce_ms = 0,
+           args = list(backend = backend, debounce_ms = 0, debounce_checkbox_ms = 0,
                        max_discrete_numeric = 0,
                        remember_removed = TRUE), {
     session$setInputs(vars = c("num", "cat"))
@@ -100,7 +100,7 @@ testServer(thanosServer,
 
 ## discrete numeric: 'num' has 5 unique values, so with the default
 ## max_discrete_numeric = 12 it gets checkboxes and MEMBERSHIP semantics
-testServer(thanosServer, args = list(backend = backend, debounce_ms = 0), {
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0, debounce_checkbox_ms = 0), {
     session$setInputs(vars = "num")
     session$setInputs(filter_num = c("2", "4"))
     check("discrete numeric filters by membership (values 2 and 4 + NA)",
@@ -109,6 +109,25 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0), {
     session$setInputs(na_num = FALSE)
     check("discrete numeric membership + exclude NA",
           identical(session$returned$rows(), c(2L, 4L)))
+})
+
+## log2(x+1) transform: slider moves to log space, filters stay raw
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     max_discrete_numeric = 0), {
+    session$setInputs(vars = "num")
+    session$setInputs(log_num = TRUE)
+    ## slider space is now log2(x+1); [1.5, 2] maps to raw [~1.83, 3]
+    session$setInputs(filter_num = c(1.5, 2))
+    check("log2 slider range filters in raw units",
+          identical(session$returned$rows(), c(2L, 3L, 6L)))
+    check("filters() reports raw units",
+          isTRUE(all.equal(session$returned$filters()$num[2], 3)))
+    ## toggling back off resets to unfiltered
+    session$setInputs(log_num = FALSE)
+    session$setInputs(filter_num = c(1, 5))
+    check("log toggle off restores linear, unfiltered",
+          session$returned$n_selected() == 6)
 })
 
 cat("\nall module tests passed\n")

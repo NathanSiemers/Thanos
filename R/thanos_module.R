@@ -29,6 +29,17 @@ library(shiny)
 thanosUI <- function(id, width = "100%") {
     ns <- NS(id)
     tagList(
+        ## loading feedback scoped STRICTLY to this module's own panels
+        ## (a subtle pulse while a plot recalculates), so embedding
+        ## Thanos never restyles anything in the host app
+        tags$style(HTML(sprintf(
+            "#%s .recalculating { opacity: 0.4; animation: thanos-pulse 1.2s ease-in-out infinite; }
+             @keyframes thanos-pulse { 50%% { opacity: 0.15; } }
+             #%s .thanos-controls { display: flex; gap: 16px; align-items: center;
+                                    flex-wrap: wrap; font-size: 85%%; color: #555;
+                                    margin: -4px 0 2px 0; }
+             #%s .thanos-controls .form-group, #%s .thanos-controls .checkbox { margin: 0; }",
+            ns("panels"), ns("panels"), ns("panels"), ns("panels")))),
         selectizeInput(ns("vars"), "Filter columns", choices = NULL,
                        multiple = TRUE, width = width),
         ## filled by the server with a one-line note explaining what
@@ -44,6 +55,7 @@ thanosServer <- function(id, backend,
                          default_selected = NULL,
                          bins = 50,
                          debounce_ms = 300,
+                         debounce_checkbox_ms = 300,
                          plot_height = "150px",
                          max_checkbox_levels = 30,
                          mode = c("auto", "vector", "aggregate"),
@@ -74,9 +86,11 @@ thanosServer <- function(id, backend,
         cache$obs    <- list()  # observers to destroy when a var is removed
         cache$seen   <- list()  # TRUE once a checkbox filter has sent a value
         cache$widget <- list()  # "slider" | "checkbox" | "selectize"
+        cache$slider <- list()  # slider bounds (lo/hi/step) per numeric var
 
         maskStore   <- reactiveValues()  # var -> logical(n_rows)
-        filterState <- reactiveValues(filters = list(), includeNA = list())
+        filterState <- reactiveValues(filters = list(), includeNA = list(),
+                                      log = list())
         varsNow     <- reactiveVal(character(0))
 
         ## one-line in-page note (Project.md): tell the user what removing
@@ -108,32 +122,49 @@ thanosServer <- function(id, backend,
                 (info$n_unique %||% Inf) <= max_discrete_numeric
             if (discrete) info$levels <- as.character(info$values)
             cache$info[[v]] <- info
+            stored_log0 <- isTRUE(isolate(filterState$log[[v]]))
             if (mode == "vector") {
                 x <- backend$get_column(v)
                 cache$col[[v]] <- x
                 cache$bin[[v]] <- bin_column(x, bins,
-                    discrete_values = if (discrete) info$values)
+                    discrete_values = if (discrete) info$values,
+                    range = if (info$is_numeric && !discrete) display_range(info),
+                    log2p1 = stored_log0)
             } else {
                 cache$bin[[v]] <- bin_spec_from_info(info, bins,
-                                                     discrete = discrete)
+                                                     discrete = discrete,
+                                                     log2p1 = stored_log0)
             }
             widget <- if (info$is_numeric && !discrete) "slider"
                       else if (length(info$levels) <= max_checkbox_levels) "checkbox"
                       else "selectize"
             cache$widget[[v]] <- widget
-            stored    <- isolate(filterState$filters[[v]])
-            stored_na <- isolate(filterState$includeNA[[v]]) %||% TRUE
+            stored     <- isolate(filterState$filters[[v]])
+            stored_na  <- isolate(filterState$includeNA[[v]]) %||% TRUE
+            stored_log <- isTRUE(isolate(filterState$log[[v]]))
+            ## log2(x+1) toggle: non-negative sliders only, and in
+            ## aggregate mode only if the SQL engine has log2()
+            can_log <- widget == "slider" && isTRUE(info$range[1] >= 0) &&
+                (mode == "vector" || isTRUE(backend$supports_log2))
+            if (!can_log) stored_log <- FALSE
+            if (widget == "slider") {
+                cache$slider[[v]] <- slider_bounds(info, log2p1 = stored_log)
+            }
             insertUI(paste0("#", ns("panels")), where = "beforeEnd",
                      immediate = TRUE,
                      ui = make_var_panel(ns, v, id, info, widget,
-                                         stored, stored_na, plot_height))
+                                         stored, stored_na, plot_height,
+                                         slider = cache$slider[[v]],
+                                         can_log = can_log,
+                                         stored_log = stored_log))
 
             ## one mask observer per variable: any change to its filter or
             ## include-NA input recomputes only THIS variable's mask
+            ## debounce sliders AND checkboxes: a lazy drag or a rapid
+            ## run of clicks coalesces into one recomputation
             raw_filter <- reactive(input[[paste0("filter_", id)]])
-            filt <- if (info$is_numeric && debounce_ms > 0) {
-                debounce(raw_filter, debounce_ms)
-            } else raw_filter
+            db_ms <- if (widget == "slider") debounce_ms else debounce_checkbox_ms
+            filt <- if (db_ms > 0) debounce(raw_filter, db_ms) else raw_filter
             has_na <- info$n_na > 0
             obs_mask <- observe({
                 val <- filt()
@@ -144,6 +175,19 @@ thanosServer <- function(id, backend,
                 if (is.null(val) && widget == "checkbox" && isTRUE(cache$seen[[v]])) {
                     val <- character(0)
                 }
+                ## a slider handle AT an endpoint means "unbounded on that
+                ## side": the visible range is outlier-robust (quantile
+                ## bounds), so endpoints must not silently drop the tails
+                if (!is.null(val) && widget == "slider") {
+                    sb <- cache$slider[[v]]
+                    if (val[1] <= sb$lo + sb$step / 2) val[1] <- -Inf
+                    if (val[2] >= sb$hi - sb$step / 2) val[2] <- Inf
+                    ## with the log2 transform active the slider lives in
+                    ## log space; the FILTER is always stored in raw units
+                    if (can_log && isTRUE(input[[paste0("log_", id)]])) {
+                        val <- ifelse(is.finite(val), 2^val - 1, val)
+                    }
+                }
                 if (mode == "vector") {
                     maskStore[[v]] <- make_mask(cache$col[[v]], val, keep_na)
                 }
@@ -151,6 +195,28 @@ thanosServer <- function(id, backend,
                 filterState$includeNA[[v]] <- keep_na
             })
             obs_list <- list(obs_mask)
+
+            if (can_log) {
+                ## toggling the transform rebins the column and rescales
+                ## the slider; the filter resets to "no restriction"
+                obs_log <- observeEvent(input[[paste0("log_", id)]], {
+                    use_log <- isTRUE(input[[paste0("log_", id)]])
+                    filterState$log[[v]] <- use_log
+                    if (mode == "vector") {
+                        cache$bin[[v]] <- bin_column(cache$col[[v]], bins,
+                            range = display_range(info), log2p1 = use_log)
+                    } else {
+                        cache$bin[[v]] <- bin_spec_from_info(info, bins,
+                                                             log2p1 = use_log)
+                    }
+                    sb <- slider_bounds(info, log2p1 = use_log)
+                    cache$slider[[v]] <- sb
+                    updateSliderInput(session, paste0("filter_", id),
+                                      min = sb$lo, max = sb$hi,
+                                      value = c(sb$lo, sb$hi), step = sb$step)
+                }, ignoreInit = TRUE)
+                obs_list <- c(obs_list, list(obs_log))
+            }
 
             if (widget == "checkbox") {
                 obs_an <- observeEvent(input[[paste0("allnone_", id)]], {
@@ -173,12 +239,15 @@ thanosServer <- function(id, backend,
 
             ## registered ONCE; O(bins) per render thanks to bin_column(),
             ## or four SQL aggregate queries in aggregate mode
+            plot_label <- function() {
+                if (isTRUE(filterState$log[[v]])) paste0(v, " (log2+1)") else v
+            }
             output[[paste0("plot_", id)]] <- if (mode == "vector") {
                 renderPlot({
                     loo <- looMasks()[[v]]
                     req(!is.null(loo))
                     own <- maskStore[[v]] %||% rep(TRUE, n_rows)
-                    plot_histo(cache$bin[[v]], loo, own, v)
+                    plot_histo(cache$bin[[v]], loo, own, plot_label())
                 })
             } else {
                 renderPlot({
@@ -186,13 +255,14 @@ thanosServer <- function(id, backend,
                     req(v %in% names(fl))
                     spec <- cache$bin[[v]]
                     loo_f <- fl[setdiff(names(fl), v)]
+                    ## one combined query for both count vectors, and the
+                    ## global row count is a reactive shared by all plots
+                    pair <- backend$get_binned_pair(v, spec, loo_f, fl[[v]])
                     plot_histo_counts(
-                        spec,
-                        shown = backend$get_binned(v, spec, loo_f),
-                        sel   = backend$get_binned(v, spec, fl),
+                        spec, shown = pair$shown, sel = pair$sel,
                         n_shown = backend$get_count(loo_f),
-                        n_sel   = backend$get_count(fl),
-                        v)
+                        n_sel   = nSelected(),
+                        plot_label())
                 })
             }
         }
@@ -206,6 +276,7 @@ thanosServer <- function(id, backend,
             cache$info[[v]]   <- NULL
             cache$seen[[v]]   <- NULL
             cache$widget[[v]] <- NULL
+            cache$slider[[v]] <- NULL
             maskStore[[v]] <- NULL
             ## deselecting a column removes its filtering COMPLETELY --
             ## no ghost filters (Project.md note).  With remember_removed
@@ -215,6 +286,7 @@ thanosServer <- function(id, backend,
             if (!remember_removed) {
                 filterState$filters[[v]]   <- NULL
                 filterState$includeNA[[v]] <- NULL
+                filterState$log[[v]]       <- NULL
             }
         }
 
@@ -295,24 +367,42 @@ thanosServer <- function(id, backend,
     })
 }
 
+## Slider geometry for a numeric variable, over the outlier-robust
+## display range (see display_range).  Kept separate from the UI builder
+## because the server also needs the bounds to translate endpoint
+## positions into "unbounded".
+slider_bounds <- function(info, log2p1 = FALSE) {
+    rng <- display_range(info)
+    if (log2p1 && all(is.finite(rng))) rng <- log2(rng + 1)
+    if (!all(is.finite(rng))) rng <- c(0, 1)
+    span <- rng[2] - rng[1]
+    step <- signif(span / 100, digits = 1)
+    if (!is.finite(step) || step == 0) step <- 0.01
+    ## integer steps make no sense in log space
+    if (!log2p1 && isTRUE(info$is_integerish) && span >= 1) {
+        step <- max(1, round(step))
+    }
+    list(lo = floor(rng[1] / step) * step,
+         hi = ceiling(rng[2] / step) * step,
+         step = step)
+}
+
 ## Build the inserted panel for one variable: filter widget, optional
 ## all/none link and include-NA checkbox, then the histogram.
 make_var_panel <- function(ns, v, id, info, widget, stored, stored_na,
-                           plot_height) {
+                           plot_height, slider = NULL,
+                           can_log = FALSE, stored_log = FALSE) {
     filter_id <- ns(paste0("filter_", id))
     extra <- NULL
     if (widget == "slider") {
-        rng <- info$range
-        if (!all(is.finite(rng))) rng <- c(0, 1)
-        span <- rng[2] - rng[1]
-        step <- signif(span / 100, digits = 1)
-        if (!is.finite(step) || step == 0) step <- 0.01
-        if (isTRUE(info$is_integerish) && span >= 1) step <- max(1, round(step))
-        lo <- floor(rng[1] / step) * step
-        hi <- ceiling(rng[2] / step) * step
-        filter_ui <- sliderInput(filter_id, v, min = lo, max = hi,
-                                 value = stored %||% c(lo, hi),
-                                 step = step, width = "100%")
+        sb <- slider %||% slider_bounds(info, log2p1 = stored_log)
+        ## stored filters are raw units; the slider may live in log space,
+        ## and stored values may contain +/-Inf (endpoint = unbounded)
+        val <- stored %||% c(sb$lo, sb$hi)
+        if (stored_log) val <- log2(val + 1)
+        val <- pmin(pmax(val, sb$lo), sb$hi)
+        filter_ui <- sliderInput(filter_id, v, min = sb$lo, max = sb$hi,
+                                 value = val, step = sb$step, width = "100%")
     } else if (widget == "checkbox") {
         filter_ui <- checkboxGroupInput(filter_id, v, choices = info$levels,
                                         selected = stored %||% info$levels,
@@ -332,7 +422,15 @@ make_var_panel <- function(ns, v, id, info, widget, stored, stored_na,
                       sprintf("include NA (%s)", format(info$n_na, big.mark = ",")),
                       value = stored_na)
     }
+    log_ui <- if (can_log) {
+        checkboxInput(ns(paste0("log_", id)), "log2 scale", value = stored_log)
+    }
+    ## secondary controls share one compact muted row (styled by the
+    ## .thanos-controls CSS in thanosUI) so the widget + plot stay primary
+    controls <- if (!is.null(extra) || !is.null(na_ui) || !is.null(log_ui)) {
+        div(class = "thanos-controls", extra, na_ui, log_ui)
+    }
     div(id = ns(paste0("panel_", id)), class = "thanos-panel",
-        filter_ui, extra, na_ui,
+        filter_ui, controls,
         plotOutput(ns(paste0("plot_", id)), height = plot_height, width = "100%"))
 }

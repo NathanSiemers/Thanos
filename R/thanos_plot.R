@@ -30,7 +30,16 @@ make_mask <- function(x, val, include_na = TRUE) {
 ## instead of O(rows): plots only ever tabulate() the precomputed indices.
 ## Fixed breaks over the full-data range also keep the x axis stable while
 ## filtering (the original geom_histogram re-derived breaks per render).
-bin_column <- function(x, bins = 50, discrete_values = NULL) {
+bin_column <- function(x, bins = 50, discrete_values = NULL, range = NULL,
+                       log2p1 = FALSE) {
+    ## log2(x+1) display transform for skewed non-negative columns:
+    ## bin in log space (breaks, mids and width are log2 units)
+    if (log2p1 && is.numeric(x) && is.null(discrete_values)) {
+        out <- bin_column(log2(x + 1), bins,
+                          range = if (!is.null(range)) log2(range + 1))
+        out$log2p1 <- TRUE
+        return(out)
+    }
     ## a numeric column treated as discrete (few unique values, checkbox
     ## widget) bins like a categorical: one bar per value, in value order
     if (is.numeric(x) && !is.null(discrete_values)) {
@@ -44,7 +53,10 @@ bin_column <- function(x, bins = 50, discrete_values = NULL) {
             return(list(kind = "num", idx = rep(NA_integer_, length(x)),
                         mids = 0, width = 1, nbins = 1))
         }
-        rng <- range(finite)
+        ## an explicit range (e.g. outlier-robust quantile bounds) wins;
+        ## values outside it clamp into the edge bins via all.inside
+        rng <- if (!is.null(range) && all(is.finite(range))) range
+               else base::range(finite)
         if (rng[1] == rng[2]) rng <- rng + c(-0.5, 0.5)
         breaks <- seq(rng[1], rng[2], length.out = bins + 1)
         idx <- findInterval(x, breaks, rightmost.closed = TRUE, all.inside = TRUE)
@@ -112,25 +124,44 @@ plot_histo <- function(bin, loo, own, var) {
                       n_shown = sum(loo), n_sel = sum(own & loo), var)
 }
 
+## Outlier-robust display range for a numeric column: the quantile
+## bounds when the backend provides them (q_low/q_high, typically 0.1%
+## and 99.9%), else the true range.  Sliders and histogram breaks use
+## this so a handful of absurd outliers (300,000-mile taxi trips) can't
+## crush the real distribution into one bin; outliers clamp into the
+## edge bins and a slider handle AT an endpoint means "unbounded".
+display_range <- function(info) {
+    rng <- info$range
+    q <- c(info$q_low %||% NA_real_, info$q_high %||% NA_real_)
+    if (all(is.finite(q)) && q[2] > q[1]) {
+        rng <- q
+        if (isTRUE(info$is_integerish)) rng <- c(floor(rng[1]), ceiling(rng[2]))
+    }
+    rng
+}
+
 ## Fixed-break bin spec from registry metadata alone (no column vector),
 ## for backends that aggregate in SQL.  Mirrors bin_column()'s geometry.
-bin_spec_from_info <- function(info, bins = 50, discrete = FALSE) {
+bin_spec_from_info <- function(info, bins = 50, discrete = FALSE,
+                               log2p1 = FALSE) {
     if (discrete && info$is_numeric) {
         labels <- as.character(info$values)
         return(list(kind = "cat", labels = labels, nbins = length(labels)))
     }
     if (info$is_numeric) {
-        rng <- info$range
+        rng <- display_range(info)
+        if (log2p1 && all(is.finite(rng))) rng <- log2(rng + 1)
         if (!all(is.finite(rng))) {
             return(list(kind = "num", mids = 0, width = 1, nbins = 1,
-                        origin = 0, binwidth = 1))
+                        origin = 0, binwidth = 1, log2p1 = log2p1))
         }
         if (rng[1] == rng[2]) rng <- rng + c(-0.5, 0.5)
         breaks <- seq(rng[1], rng[2], length.out = bins + 1)
         list(kind = "num",
              mids = (breaks[-1] + breaks[-(bins + 1)]) / 2,
              width = breaks[2] - breaks[1], nbins = bins,
-             origin = rng[1], binwidth = breaks[2] - breaks[1])
+             origin = rng[1], binwidth = breaks[2] - breaks[1],
+             log2p1 = log2p1)
     } else {
         list(kind = "cat", labels = info$levels, nbins = length(info$levels))
     }

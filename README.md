@@ -59,6 +59,30 @@ get **checkboxes with membership semantics** instead of a slider; the
 threshold is `thanosServer(max_discrete_numeric = 12)`. Their
 histograms show one bar per value, in numeric order.
 
+Sliders and histogram breaks use an **outlier-robust display range**
+(the 0.1%–99.9% quantiles, from the backend/registry) so a few absurd
+values can't crush the real distribution into one bin. Outliers clamp
+into the edge bins, and a slider handle resting **at an endpoint means
+"unbounded on that side"** — no rows are silently dropped by the
+robust bounds.
+
+Non-negative numeric columns get a small **log2 scale** toggle: the
+slider and histogram move to log2(x+1) space (good for skewed data
+like fares), while the actual filter — and everything a parent app
+sees via `filters()`/`rows()` — stays in raw units. In aggregate mode
+the toggle appears only if the SQL engine has `log2()` (DuckDB yes,
+stock RSQLite no).
+
+**Reactive hygiene** (all handled inside the module, parent apps need
+nothing): slider inputs are debounced (`debounce_ms`, default 300 ms)
+and so are checkbox groups (`debounce_checkbox_ms`, default 300 ms —
+rapidly ticking half a dozen boxes coalesces into one recomputation),
+and Shiny reactives pull the *latest* value rather than replaying a
+queue, so the module can never fall progressively behind; at most one
+stale render can be in flight. While a plot recalculates it pulses
+gently — CSS scoped to the module's own panels, so a host app is
+never restyled.
+
 ## Two execution modes
 
 `thanosServer()` picks a mode automatically (`mode = "auto"`):

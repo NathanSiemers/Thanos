@@ -96,5 +96,19 @@ sliders.  Consider what to do with things like 'month' where it's numeric
 but with limited range of values.  Checkboxes when number of unique numeric values
 is less than something set as a configuration variable perhaps.
 
+Make sure that things like lazy slides through the sliders don't produce a bunch of 
+reactive events that take forever to catch up - this is a common problem with
+reactives.  Let me know if we can solve this in the module, or if we should better
+address it in any parent app.  The former is preferred, however.
+
+Consider a log2+1 transform checkbox for any field with non-negative values.  Adjust 
+the size and display of these things to try to be elegant, making certain things more 
+or less prominent in the UI - avoid being too ugly.
+
+You might consider also debouncing checkboxes - sometimes a user wants to select half
+a dozen very quickly
+
+
+
 
 

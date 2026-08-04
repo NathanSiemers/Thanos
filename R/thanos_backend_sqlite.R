@@ -32,19 +32,13 @@
 backend_dbi <- function(con,
                         table = "long_data",
                         registry = "column_registry") {
-    ## n_unique + numeric levels_json are newer registry columns; older
-    ## databases still work (discrete-numeric detection just stays off)
-    reg <- tryCatch(
-        DBI::dbGetQuery(con, sprintf(
-            "SELECT column_name, type, n_rows, n_na, min_val, max_val,
-                    is_integerish, n_unique, levels_json FROM %s", registry)),
-        error = function(e) {
-            r <- DBI::dbGetQuery(con, sprintf(
-                "SELECT column_name, type, n_rows, n_na, min_val, max_val,
-                        is_integerish, levels_json FROM %s", registry))
-            r$n_unique <- NA_integer_
-            r
-        })
+    ## registries from older builds may lack newer columns (n_unique,
+    ## q_low/q_high); read what exists and fill the rest with NA so old
+    ## databases keep working (the associated features just stay off)
+    reg <- DBI::dbGetQuery(con, sprintf("SELECT * FROM %s", registry))
+    for (col in c("n_unique", "q_low", "q_high")) {
+        if (is.null(reg[[col]])) reg[[col]] <- NA_real_
+    }
     n <- reg$n_rows[1]
 
     infos <- lapply(seq_len(nrow(reg)), function(i) {
@@ -55,7 +49,8 @@ backend_dbi <- function(con,
                  is_integerish = isTRUE(r$is_integerish == 1),
                  n_unique = if (!is.na(r$n_unique)) r$n_unique,
                  values = if (!is.na(r$levels_json))
-                     as.numeric(jsonlite::fromJSON(r$levels_json)))
+                     as.numeric(jsonlite::fromJSON(r$levels_json)),
+                 q_low = r$q_low, q_high = r$q_high)
         } else {
             list(name = r$column_name, is_numeric = FALSE, n_na = r$n_na,
                  levels = as.character(jsonlite::fromJSON(r$levels_json)))
@@ -91,6 +86,26 @@ backend_dbi <- function(con,
     qs <- function(s) as.character(DBI::dbQuoteString(con, s))
     num <- function(x) sprintf("%.17g", x)
 
+    ## the log2(x+1) display transform needs log2() in SQL; SQLite may be
+    ## compiled without math functions, so probe once
+    log2_ok <- tryCatch({
+        DBI::dbGetQuery(con, "SELECT log2(2.0) AS x")$x == 1
+    }, error = function(e) FALSE)
+    ## engines disagree on CAST(double AS INTEGER): SQLite truncates
+    ## (= floor for our non-negative offsets), DuckDB ROUNDS, which would
+    ## shift every histogram by half a bin -- use floor() where available
+    floor_ok <- tryCatch({
+        DBI::dbGetQuery(con, "SELECT floor(1.7) AS x")$x == 1
+    }, error = function(e) FALSE)
+
+    ## the binning expression for a numeric spec, honoring the transform
+    bin_value_expr <- function(spec) {
+        v <- if (isTRUE(spec$log2p1)) "log2(value_num + 1)" else "value_num"
+        ratio <- sprintf("(%s - %s) / %s", v, num(spec$origin), num(spec$binwidth))
+        if (floor_ok) sprintf("CAST(floor(%s) AS INTEGER) + 1", ratio)
+        else sprintf("CAST(%s AS INTEGER) + 1", ratio)
+    }
+
     ## one SQL condition per filtered variable, per the NA semantics above
     filter_clauses <- function(filters) {
         out <- character(0)
@@ -123,16 +138,25 @@ backend_dbi <- function(con,
                     }
                 }
             } else if (f$is_numeric) {
+                ## infinite bounds (slider handle at an endpoint =
+                ## "unbounded on that side") contribute no condition
+                lo <- f$val[1]; hi <- f$val[2]
                 if (keep_na) {
-                    sprintf(paste("row_id NOT IN (SELECT row_id FROM %s",
-                                  "WHERE column_name = %s AND",
-                                  "(value_num < %s OR value_num > %s))"),
-                            table, vq, num(f$val[1]), num(f$val[2]))
+                    fail <- c(if (is.finite(lo)) sprintf("value_num < %s", num(lo)),
+                              if (is.finite(hi)) sprintf("value_num > %s", num(hi)))
+                    if (length(fail) == 0) next  # fully unbounded: no filter
+                    sprintf("row_id NOT IN (SELECT row_id FROM %s WHERE column_name = %s AND (%s))",
+                            table, vq, paste(fail, collapse = " OR "))
                 } else {
-                    sprintf(paste("row_id IN (SELECT row_id FROM %s",
-                                  "WHERE column_name = %s AND",
-                                  "value_num BETWEEN %s AND %s)"),
-                            table, vq, num(f$val[1]), num(f$val[2]))
+                    pass <- c(if (is.finite(lo)) sprintf("value_num >= %s", num(lo)),
+                              if (is.finite(hi)) sprintf("value_num <= %s", num(hi)))
+                    if (length(pass) == 0) {
+                        sprintf("row_id IN (SELECT row_id FROM %s WHERE column_name = %s)",
+                                table, vq)
+                    } else {
+                        sprintf("row_id IN (SELECT row_id FROM %s WHERE column_name = %s AND %s)",
+                                table, vq, paste(pass, collapse = " AND "))
+                    }
                 }
             } else if (length(f$val) == 0) {
                 if (keep_na) {
@@ -178,6 +202,7 @@ backend_dbi <- function(con,
         },
 
         supports_binned = TRUE,
+        supports_log2 = log2_ok,
 
         ## histogram counts for `name` over rows passing `filters`,
         ## binned per `spec` (a bin_spec_from_info()/bin_column() result)
@@ -197,9 +222,7 @@ backend_dbi <- function(con,
                 counts[hit[!is.na(hit)]] <- res$cnt[!is.na(hit)]
                 counts
             } else if (info$is_numeric) {
-                bin_expr <- sprintf(
-                    "CAST((value_num - %s) / %s AS INTEGER) + 1",
-                    num(spec$origin), num(spec$binwidth))
+                bin_expr <- bin_value_expr(spec)
                 res <- DBI::dbGetQuery(con, sprintf(
                     "SELECT CASE WHEN %s > %d THEN %d
                                  WHEN %s < 1 THEN 1 ELSE %s END AS bin,
@@ -221,6 +244,65 @@ backend_dbi <- function(con,
                 counts[hit[!is.na(hit)]] <- res$cnt[!is.na(hit)]
             }
             counts
+        },
+
+        ## shown and sel counts in ONE query: shown = rows passing the
+        ## leave-one-out filters, sel = of those, rows also passing this
+        ## variable's own filter (a CASE on the value itself -- cheap).
+        ## Halves the per-plot query load vs two get_binned() calls.
+        get_binned_pair = function(name, spec, loo_filters, own) {
+            info <- infos[[name]]
+            clauses <- filter_clauses(loo_filters)
+            vq <- qs(name)
+            value_col <- if (info$is_numeric) "value_num" else "value_txt"
+            own_pred <- if (is.null(own) || is.null(own$val)) {
+                NULL                                   # no own filter: sel = shown
+            } else if (info$is_numeric && is.character(own$val)) {
+                if (length(own$val) == 0) "1 = 0"
+                else sprintf("value_num IN (%s)",
+                             paste(vapply(as.numeric(own$val), num,
+                                          character(1)), collapse = ", "))
+            } else if (info$is_numeric) {
+                pass <- c(if (is.finite(own$val[1]))
+                              sprintf("value_num >= %s", num(own$val[1])),
+                          if (is.finite(own$val[2]))
+                              sprintf("value_num <= %s", num(own$val[2])))
+                if (length(pass) == 0) NULL
+                else paste(pass, collapse = " AND ")
+            } else {
+                if (length(own$val) == 0) "1 = 0"
+                else sprintf("value_txt IN (%s)",
+                             paste(vapply(own$val, qs, character(1)),
+                                   collapse = ", "))
+            }
+            sel_expr <- if (is.null(own_pred)) "COUNT(*)" else
+                sprintf("SUM(CASE WHEN %s THEN 1 ELSE 0 END)", own_pred)
+            if (spec$kind == "num") {
+                bin_expr <- bin_value_expr(spec)
+                res <- DBI::dbGetQuery(con, sprintf(
+                    "SELECT CASE WHEN %s > %d THEN %d
+                                 WHEN %s < 1 THEN 1 ELSE %s END AS bin,
+                            COUNT(*) AS shown, %s AS sel
+                     FROM %s WHERE column_name = %s AND value_num IS NOT NULL%s
+                     GROUP BY bin",
+                    bin_expr, spec$nbins, spec$nbins, bin_expr, bin_expr,
+                    sel_expr, table, vq, where_sql(clauses)))
+                shown <- rep(0, spec$nbins); sel <- rep(0, spec$nbins)
+                shown[res$bin] <- res$shown
+                sel[res$bin]   <- res$sel
+            } else {
+                res <- DBI::dbGetQuery(con, sprintf(
+                    "SELECT %s AS lev, COUNT(*) AS shown, %s AS sel
+                     FROM %s WHERE column_name = %s%s
+                     GROUP BY %s",
+                    value_col, sel_expr, table, vq, where_sql(clauses),
+                    value_col))
+                shown <- rep(0, spec$nbins); sel <- rep(0, spec$nbins)
+                hit <- match(as.character(res$lev), spec$labels)
+                shown[hit[!is.na(hit)]] <- res$shown[!is.na(hit)]
+                sel[hit[!is.na(hit)]]   <- res$sel[!is.na(hit)]
+            }
+            list(shown = shown, sel = sel)
         },
 
         get_count = function(filters) {

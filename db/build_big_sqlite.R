@@ -79,6 +79,11 @@ bump <- function(col, x, type) {
             s$vals <- union(s$vals, unique(x[!is.na(x)]))
             if (length(s$vals) > 100) s$too_many <- TRUE
         }
+        ## keep a bounded random sample per chunk for quantile estimates
+        ## (exact quantiles would need the whole 38M-value column)
+        good <- x[!is.na(x)]
+        if (length(good) > 20000) good <- sample(good, 20000)
+        s$samp <- c(s$samp %||% numeric(0), good)
     } else {
         s$levels <- union(s$levels, unique(x[!is.na(x)]))
     }
@@ -131,15 +136,21 @@ dbExecute(con,
          max_val       REAL,
          is_integerish INTEGER,
          n_unique      INTEGER,
+         q_low         REAL,
+         q_high        REAL,
          levels_json   TEXT
      )")
 for (col in names(acc$stats)) {
     s <- acc$stats[[col]]
     reg <- if (s$type == "numeric") {
+        q <- if (length(s$samp %||% numeric(0)) > 0) {
+            unname(quantile(s$samp, c(0.001, 0.999)))
+        } else c(NA_real_, NA_real_)
         data.frame(column_name = col, type = "numeric", n_rows = acc$n,
                    n_na = s$n_na, min_val = s$min, max_val = s$max,
                    is_integerish = NA_integer_,
                    n_unique = if (s$too_many) NA_integer_ else length(s$vals),
+                   q_low = q[1], q_high = q[2],
                    levels_json = if (!s$too_many && length(s$vals) > 0) {
                        as.character(jsonlite::toJSON(sort(s$vals)))
                    } else NA_character_)
@@ -147,6 +158,7 @@ for (col in names(acc$stats)) {
         data.frame(column_name = col, type = "character", n_rows = acc$n,
                    n_na = s$n_na, min_val = NA_real_, max_val = NA_real_,
                    is_integerish = NA_integer_, n_unique = length(s$levels),
+                   q_low = NA_real_, q_high = NA_real_,
                    levels_json = as.character(jsonlite::toJSON(sort(s$levels))))
     }
     dbWriteTable(con, "column_registry", reg, append = TRUE)

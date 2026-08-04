@@ -29,7 +29,8 @@ backend <- backend_memory(df)
 
 ## a minimal parent server embedding the module, like apps/grapher
 parent_server <- function(input, output, session) {
-    th <- thanosServer("thanos", backend, debounce_ms = 0)
+    th <- thanosServer("thanos", backend, debounce_ms = 0,
+                       debounce_checkbox_ms = 0)
     plot_data <- reactive({
         r <- th$rows()
         data.frame(a = backend$get_column("a")[r],

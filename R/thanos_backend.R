@@ -46,6 +46,9 @@ backend_memory <- function(df) {
             x <- df[[name]]
             info <- if (is.numeric(x)) {
                 vals <- sort(unique(x[!is.na(x)]))
+                q <- if (length(vals) > 0) {
+                    unname(quantile(x, c(0.001, 0.999), na.rm = TRUE))
+                } else c(NA_real_, NA_real_)
                 list(name = name, is_numeric = TRUE, n_na = sum(is.na(x)),
                      range = suppressWarnings(range(x, na.rm = TRUE)),
                      is_integerish = is.integer(x) ||
@@ -53,7 +56,9 @@ backend_memory <- function(df) {
                      n_unique = length(vals),
                      ## the actual values, kept only when few enough to
                      ## drive a checkbox widget (discrete numerics)
-                     values = if (length(vals) <= 100) vals)
+                     values = if (length(vals) <= 100) vals,
+                     ## outlier-robust display bounds (see display_range)
+                     q_low = q[1], q_high = q[2])
             } else {
                 list(name = name, is_numeric = FALSE, n_na = sum(is.na(x)),
                      levels = sort(unique(x[!is.na(x)])))
