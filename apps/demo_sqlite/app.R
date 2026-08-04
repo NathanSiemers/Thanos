@@ -10,11 +10,12 @@
 library(shiny)
 library(ggplot2)
 
-thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos_module.R")),
+## one line loads Thanos: publics land here, internals stay in a
+## private namespace (see R/thanos.R)
+thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
                        c("R", "../R", "../../R"))[1]
 if (is.na(thanos_r_dir)) stop("cannot locate the Thanos R/ directory")
-invisible(lapply(list.files(thanos_r_dir, pattern = "[.]R$", full.names = TRUE),
-                 source))
+source(file.path(thanos_r_dir, "thanos.R"))
 
 db_path <- file.path(dirname(thanos_r_dir), "db", "data", "flights.sqlite")
 if (!file.exists(db_path)) {

@@ -108,6 +108,8 @@ or less prominent in the UI - avoid being too ugly.
 You might consider also debouncing checkboxes - sometimes a user wants to select half
 a dozen very quickly
 
+Consider if a separate namespace for the code is a good idea, implement it if it doesn't
+make the code any more difficult to use.
 
 
 

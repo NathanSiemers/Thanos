@@ -8,7 +8,7 @@ suppressPackageStartupMessages({
 })
 root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_module.R")),
                c(".", ".."))[1]
-invisible(lapply(list.files(file.path(root, "R"), pattern = "[.]R$",
+invisible(lapply(list.files(file.path(root, "R"), pattern = "^thanos_.*[.]R$",
                             full.names = TRUE), source))
 
 check <- function(label, expr) {

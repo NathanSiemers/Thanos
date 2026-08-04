@@ -51,16 +51,19 @@ library(ggplot2)
 library(nycflights13)
 
 ################################################################
-## PLUG-IN POINT 1 of 4: source the Thanos code.
-## Thanos is a directory of plain R function files -- no package
-## install, no namespace magic.  An established app would typically
-## copy R/ (or add this repo as a submodule) and source it like this.
+## PLUG-IN POINT 1 of 4: source the Thanos loader -- ONE file.
+## An established app copies the R/ directory (or adds this repo as a
+## submodule) and sources R/thanos.R.  That defines exactly six
+## functions here (thanosUI, thanosServer, backend_memory, backend_dbi,
+## backend_sqlite, backend_duckdb) plus `thanos`, a handle to the
+## private namespace.  All internals stay inside that namespace, so
+## nothing Thanos uses can collide with functions your app defines,
+## and your same-named functions cannot break the module.
 ################################################################
-thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos_module.R")),
+thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
                        c("R", "../R", "../../R"))[1]
 if (is.na(thanos_r_dir)) stop("cannot locate the Thanos R/ directory")
-invisible(lapply(list.files(thanos_r_dir, pattern = "[.]R$", full.names = TRUE),
-                 source))
+source(file.path(thanos_r_dir, "thanos.R"))
 
 ################################################################
 ## PLUG-IN POINT 2 of 4: wrap your data in a backend.

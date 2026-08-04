@@ -11,6 +11,9 @@ See `Project.md` for the project goals and roadmap.
 ## Layout
 
 - `R/` — the sourceable module code
+  - `thanos.R` — **the loader: `source()` this one file.** Defines the
+    public API (`thanosUI`, `thanosServer`, `backend_*`) plus `thanos`,
+    a handle to the private namespace holding all internals
   - `thanos_module.R` — `thanosUI()` / `thanosServer()` (the module)
   - `thanos_backend.R` — backend contract + `backend_memory(df)`
   - `thanos_backend_sqlite.R` — `backend_dbi()` over the tall/skinny
@@ -118,7 +121,9 @@ with the parent/module interaction contract documented inline. Short
 version:
 
 ```r
-invisible(lapply(list.files("R", pattern = "[.]R$", full.names = TRUE), source))
+source("R/thanos.R")   # one file; publics only, internals stay in a
+                       # private namespace (no name collisions with
+                       # your app in either direction)
 
 backend <- backend_memory(my_data_frame)      # or a DB backend
 

@@ -7,7 +7,7 @@
 suppressPackageStartupMessages(library(ggplot2))
 root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_backend.R")),
                c(".", ".."))[1]
-invisible(lapply(list.files(file.path(root, "R"), pattern = "[.]R$",
+invisible(lapply(list.files(file.path(root, "R"), pattern = "^thanos_.*[.]R$",
                             full.names = TRUE), source))
 
 timeit <- function(label, expr, reps = 3) {
