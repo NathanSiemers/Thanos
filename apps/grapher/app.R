@@ -162,12 +162,23 @@ server <- function(input, output, session) {
     ## surviving rows -- Thanos never ships data, only the pointer.
     ## With a DB backend this same code would fetch just the plotted
     ## columns for just the surviving rows.
+    ##
+    ## NA NOTE -- read this if you see ggplot 'Removed N rows' warnings:
+    ## th$rows() rightly includes rows with NAs (each filter column has
+    ## an 'include NA' checkbox, default ON, and columns you never
+    ## filtered aren't checked at all). Whether those rows are USABLE
+    ## depends on the columns YOUR app consumes -- here, the plotted
+    ## x/y/color/size. That is the parent's call, not the module's:
+    ## drop them explicitly (as below), or plot them your own way.
     plot_data <- reactive({
         cols <- unique(c(input$x, input$y,
                          setdiff(c(input$color, input$size), "(none)")))
         r <- plot_rows()
-        as.data.frame(lapply(setNames(cols, cols),
-                             function(cn) backend$get_column(cn)[r]))
+        df <- as.data.frame(lapply(setNames(cols, cols),
+                                   function(cn) backend$get_column(cn)[r]))
+        keep <- complete.cases(df)
+        attr(df, "n_na_dropped") <- sum(!keep)
+        df[keep, , drop = FALSE]
     })
 
     ## From here down: 100% ordinary grapher code.  It has no idea
@@ -197,9 +208,16 @@ server <- function(input, output, session) {
         capped <- if (n_sel > PLOT_CAP) {
             sprintf(" (plotting a %s-row sample)", format(PLOT_CAP, big.mark = ","))
         } else ""
-        sprintf("%s of %s rows pass filters%s",
+        ## be transparent about rows dropped for NA in the PLOTTED
+        ## columns -- these passed the filters; they just can't be drawn
+        n_na <- attr(plot_data(), "n_na_dropped") %||% 0
+        na_note <- if (n_na > 0) {
+            sprintf("; %s not drawn (NA in a plotted column)",
+                    format(n_na, big.mark = ","))
+        } else ""
+        sprintf("%s of %s rows pass filters%s%s",
                 format(n_sel, big.mark = ","),
-                format(backend$n_rows(), big.mark = ","), capped)
+                format(backend$n_rows(), big.mark = ","), capped, na_note)
     })
 }
 

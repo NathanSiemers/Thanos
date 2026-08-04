@@ -130,4 +130,30 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
           session$returned$n_selected() == 6)
 })
 
+## UI construction rules (white box, via make_var_panel):
+##  - ANY column with NAs gets an include-NA checkbox, categorical too
+##  - any non-negative continuous column gets the log2 toggle
+info_num <- backend$get_column_info("num")   # numeric, has NA, min >= 0
+p_slider <- as.character(make_var_panel(
+    NS("t"), "num", "num", info_num, "slider", NULL, TRUE, "150px",
+    slider = slider_bounds(info_num), can_log = TRUE, stored_log = FALSE))
+check("non-negative slider panel offers include-NA AND log2 controls",
+      grepl("na_num", p_slider) && grepl("log_num", p_slider))
+
+be2 <- backend_memory(data.frame(catna = c("a", "b", NA),
+                                 stringsAsFactors = FALSE))
+info_cat <- be2$get_column_info("catna")
+p_cat <- as.character(make_var_panel(
+    NS("t"), "catna", "catna", info_cat, "checkbox", NULL, TRUE, "150px"))
+check("categorical panel with NAs offers include-NA too",
+      grepl("na_catna", p_cat) && grepl("include NA", p_cat))
+
+be3 <- backend_memory(data.frame(nona = c("a", "b", "c"),
+                                 stringsAsFactors = FALSE))
+p_nona <- as.character(make_var_panel(
+    NS("t"), "nona", "nona", be3$get_column_info("nona"), "checkbox",
+    NULL, TRUE, "150px"))
+check("column without NAs gets no include-NA checkbox",
+      !grepl("na_nona", p_nona))
+
 cat("\nall module tests passed\n")
