@@ -31,6 +31,11 @@ thanosUI <- function(id, width = "100%") {
     tagList(
         selectizeInput(ns("vars"), "Filter columns", choices = NULL,
                        multiple = TRUE, width = width),
+        ## filled by the server with a one-line note explaining what
+        ## removing a column does (wording depends on remember_removed);
+        ## in-page text rather than a notification so the module stays
+        ## polite when embedded in a host app
+        uiOutput(ns("removal_note")),
         div(id = ns("panels"))
     )
 }
@@ -43,7 +48,9 @@ thanosServer <- function(id, backend,
                          max_checkbox_levels = 30,
                          mode = c("auto", "vector", "aggregate"),
                          aggregate_threshold = 2e6,
-                         remember_removed = FALSE) {
+                         remember_removed = FALSE,
+                         removal_note = TRUE,
+                         max_discrete_numeric = 12) {
     mode <- match.arg(mode)
     moduleServer(id, function(input, output, session) {
         ns <- session$ns
@@ -72,6 +79,18 @@ thanosServer <- function(id, backend,
         filterState <- reactiveValues(filters = list(), includeNA = list())
         varsNow     <- reactiveVal(character(0))
 
+        ## one-line in-page note (Project.md): tell the user what removing
+        ## a column does, without notifications a host app can't control
+        output$removal_note <- renderUI({
+            if (!removal_note) return(NULL)
+            div(style = "font-size: 85%; color: #777; font-style: italic; margin: -8px 0 8px 0;",
+                if (remember_removed) {
+                    "removing a column stops its filtering; re-adding it restores its last filter"
+                } else {
+                    "removing a column clears its filter completely"
+                })
+        })
+
         all_columns <- backend$get_columns()
         updateSelectizeInput(session, "vars", choices = all_columns,
             selected = intersect(default_selected %||% character(0), all_columns),
@@ -83,15 +102,22 @@ thanosServer <- function(id, backend,
         add_var <- function(v) {
             info <- backend$get_column_info(v)
             id <- vid(v)
+            ## a numeric column with few distinct values ('month') gets
+            ## checkboxes with membership semantics instead of a slider
+            discrete <- isTRUE(info$is_numeric) && !is.null(info$values) &&
+                (info$n_unique %||% Inf) <= max_discrete_numeric
+            if (discrete) info$levels <- as.character(info$values)
             cache$info[[v]] <- info
             if (mode == "vector") {
                 x <- backend$get_column(v)
                 cache$col[[v]] <- x
-                cache$bin[[v]] <- bin_column(x, bins)
+                cache$bin[[v]] <- bin_column(x, bins,
+                    discrete_values = if (discrete) info$values)
             } else {
-                cache$bin[[v]] <- bin_spec_from_info(info, bins)
+                cache$bin[[v]] <- bin_spec_from_info(info, bins,
+                                                     discrete = discrete)
             }
-            widget <- if (info$is_numeric) "slider"
+            widget <- if (info$is_numeric && !discrete) "slider"
                       else if (length(info$levels) <= max_checkbox_levels) "checkbox"
                       else "selectize"
             cache$widget[[v]] <- widget

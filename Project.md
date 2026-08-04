@@ -87,5 +87,14 @@ The important files are thanos.R and the current testing app.R
 We might have a situation where a user removes a column from the "Filter Columns" 
 selector.  What's the right action? I think any filtering for that column should
 be removed so we don't have any ghost filtering going on.  Consider this 
-and make a remedy.
+and make a remedy.  Might be good to notify the user of this, but if this code
+is just part of some module, used in other apps, that might be awkward.  Perhaps
+a text comment in the web page itself would be easier/better?
+
+I notice you are treating any column with numeric values as 'numeric' data with
+sliders.  Consider what to do with things like 'month' where it's numeric
+but with limited range of values.  Checkboxes when number of unique numeric values
+is less than something set as a configuration variable perhaps.
+
+
 

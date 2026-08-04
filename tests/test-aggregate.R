@@ -27,6 +27,7 @@ df <- data.frame(
     b = ifelse(runif(2000) < 0.1, NA, rnorm(2000)),
     g = sample(c("p", "q", "r", NA), 2000, replace = TRUE,
                prob = c(.4, .3, .2, .1)),
+    m = ifelse(runif(2000) < 0.05, NA, sample(1:6, 2000, replace = TRUE)),
     stringsAsFactors = FALSE
 )
 db_path <- tempfile(fileext = ".sqlite")
@@ -77,6 +78,22 @@ check("categorical binned counts match tabulate",
       isTRUE(all.equal(be$get_binned("g", spec_g, loo_g_f),
                        as.numeric(tabulate(bin_g$idx[loo_g_m],
                                            nbins = bin_g$nbins)))))
+
+## discrete numeric ('m', 6 unique values): membership semantics in SQL
+info_m <- be$get_column_info("m")
+check("registry carries n_unique + values for discrete numerics",
+      info_m$n_unique == 6 && identical(info_m$values, as.numeric(1:6)))
+filters_m <- list(m = list(is_numeric = TRUE, val = c("2", "5"),
+                           include_na = TRUE))
+m_m <- make_mask(df$m, c("2", "5"), TRUE)
+check("discrete numeric membership count matches R",
+      be$get_count(filters_m) == sum(m_m))
+spec_m <- bin_spec_from_info(info_m, discrete = TRUE)
+bin_m  <- bin_column(df$m, discrete_values = info_m$values)
+check("discrete numeric binned counts match tabulate",
+      isTRUE(all.equal(be$get_binned("m", spec_m, filters["a"]),
+                       as.numeric(tabulate(bin_m$idx[m_a],
+                                           nbins = bin_m$nbins)))))
 
 ## whole-module equivalence: aggregate vs vector mode, same inputs
 run_module <- function(backend, mode) {

@@ -71,13 +71,24 @@ run("CREATE TABLE column_registry (
         column_name TEXT PRIMARY KEY, type TEXT NOT NULL,
         n_rows INTEGER NOT NULL, n_na INTEGER NOT NULL,
         min_val REAL, max_val REAL, is_integerish INTEGER,
-        levels_json TEXT)")
+        n_unique INTEGER, levels_json TEXT)")
 for (col in NUM_COLS) {
-    run(sprintf(
-        "INSERT INTO column_registry
-         SELECT '%s', 'numeric', %d, %d - COUNT(*),
-                MIN(value_num), MAX(value_num), NULL, NULL
-         FROM long_data WHERE column_name = '%s'", col, n, n, col))
+    s <- dbGetQuery(con, sprintf(
+        "SELECT COUNT(*) AS n_present, MIN(value_num) AS mn,
+                MAX(value_num) AS mx, COUNT(DISTINCT value_num) AS nu
+         FROM long_data WHERE column_name = '%s'", col))
+    ## few distinct values -> keep them so the module can offer checkboxes
+    levels_json <- if (s$nu > 0 && s$nu <= 100) {
+        vals <- dbGetQuery(con, sprintf(
+            "SELECT DISTINCT value_num AS v FROM long_data
+             WHERE column_name = '%s' ORDER BY v", col))$v
+        as.character(jsonlite::toJSON(vals))
+    } else NA_character_
+    dbWriteTable(con, "column_registry", append = TRUE,
+        data.frame(column_name = col, type = "numeric", n_rows = n,
+                   n_na = n - s$n_present, min_val = s$mn, max_val = s$mx,
+                   is_integerish = NA_integer_, n_unique = s$nu,
+                   levels_json = levels_json))
 }
 for (col in TXT_COLS) {
     ## levels_json built in R: duckdb's to_json needs the json extension,
@@ -92,6 +103,7 @@ for (col in TXT_COLS) {
         data.frame(column_name = col, type = "character", n_rows = n,
                    n_na = n - n_present, min_val = NA_real_,
                    max_val = NA_real_, is_integerish = NA_integer_,
+                   n_unique = length(levs),
                    levels_json = as.character(jsonlite::toJSON(levs))))
 }
 run(sprintf("CREATE TABLE row_universe AS

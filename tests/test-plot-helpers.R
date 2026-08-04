@@ -36,6 +36,20 @@ check("categorical empty selection keeps only NA (include_na = TRUE)",
 check("categorical empty selection + exclude NA keeps nothing",
       identical(make_mask(y, character(0), include_na = FALSE), rep(FALSE, 5)))
 
+## ---- make_mask: discrete numeric (character val = membership) ----
+xm <- c(1, 2, 3, NA, 2)
+check("character val on numeric column means membership, NA kept",
+      identical(make_mask(xm, c("2", "3")), c(FALSE, TRUE, TRUE, TRUE, TRUE)))
+check("membership + exclude NA",
+      identical(make_mask(xm, c("2", "3"), include_na = FALSE),
+                c(FALSE, TRUE, TRUE, FALSE, TRUE)))
+
+## ---- bin_column: discrete numeric ----
+bd <- bin_column(c(2, 1, NA, 2), discrete_values = c(1, 2))
+check("discrete numeric bins one bar per value, NA unbinned",
+      identical(bd$labels, c("1", "2")) &&
+      identical(bd$idx, c(2L, 1L, NA_integer_, 2L)) && bd$kind == "cat")
+
 ## ---- bin_column: numeric ----
 b <- bin_column(c(0, 25, 50, 75, 100), bins = 4)
 check("numeric binning spans the range", b$nbins == 4)

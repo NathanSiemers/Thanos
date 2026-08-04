@@ -59,6 +59,7 @@ build_tall_skinny <- function(df, db_path,
              min_val       REAL,
              max_val       REAL,
              is_integerish INTEGER,
+             n_unique      INTEGER,
              levels_json   TEXT
          )", registry))
 
@@ -71,6 +72,7 @@ build_tall_skinny <- function(df, db_path,
                                 column_name = rep(col, sum(ok)),
                                 value_num = x[ok],
                                 value_txt = rep(NA_character_, sum(ok)))
+            vals <- sort(unique(x[ok]))
             reg <- data.frame(
                 column_name = col, type = "numeric", n_rows = n,
                 n_na = sum(!ok),
@@ -78,7 +80,11 @@ build_tall_skinny <- function(df, db_path,
                 max_val = suppressWarnings(max(x, na.rm = TRUE)),
                 is_integerish = as.integer(is.integer(x) ||
                     isTRUE(all(x == round(x), na.rm = TRUE))),
-                levels_json = NA_character_)
+                n_unique = length(vals),
+                ## values kept when few enough to drive checkboxes
+                levels_json = if (length(vals) <= 100 && length(vals) > 0) {
+                    as.character(jsonlite::toJSON(vals))
+                } else NA_character_)
         } else {
             chunk <- data.frame(row_id = which(ok),
                                 column_name = rep(col, sum(ok)),
@@ -88,8 +94,8 @@ build_tall_skinny <- function(df, db_path,
             reg <- data.frame(
                 column_name = col, type = "character", n_rows = n,
                 n_na = sum(!ok), min_val = NA_real_, max_val = NA_real_,
-                is_integerish = NA_integer_,
-                levels_json = jsonlite::toJSON(levs))
+                is_integerish = NA_integer_, n_unique = length(levs),
+                levels_json = as.character(jsonlite::toJSON(levs)))
         }
         dbWriteTable(con, table, chunk, append = TRUE)
         dbWriteTable(con, registry, reg, append = TRUE)

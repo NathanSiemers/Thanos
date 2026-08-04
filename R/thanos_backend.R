@@ -45,10 +45,15 @@ backend_memory <- function(df) {
             if (!is.null(cached)) return(cached)
             x <- df[[name]]
             info <- if (is.numeric(x)) {
+                vals <- sort(unique(x[!is.na(x)]))
                 list(name = name, is_numeric = TRUE, n_na = sum(is.na(x)),
                      range = suppressWarnings(range(x, na.rm = TRUE)),
                      is_integerish = is.integer(x) ||
-                         isTRUE(all(x == round(x), na.rm = TRUE)))
+                         isTRUE(all(x == round(x), na.rm = TRUE)),
+                     n_unique = length(vals),
+                     ## the actual values, kept only when few enough to
+                     ## drive a checkbox widget (discrete numerics)
+                     values = if (length(vals) <= 100) vals)
             } else {
                 list(name = name, is_numeric = FALSE, n_na = sum(is.na(x)),
                      levels = sort(unique(x[!is.na(x)])))

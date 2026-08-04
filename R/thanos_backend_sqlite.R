@@ -32,9 +32,19 @@
 backend_dbi <- function(con,
                         table = "long_data",
                         registry = "column_registry") {
-    reg <- DBI::dbGetQuery(con, sprintf(
-        "SELECT column_name, type, n_rows, n_na, min_val, max_val,
-                is_integerish, levels_json FROM %s", registry))
+    ## n_unique + numeric levels_json are newer registry columns; older
+    ## databases still work (discrete-numeric detection just stays off)
+    reg <- tryCatch(
+        DBI::dbGetQuery(con, sprintf(
+            "SELECT column_name, type, n_rows, n_na, min_val, max_val,
+                    is_integerish, n_unique, levels_json FROM %s", registry)),
+        error = function(e) {
+            r <- DBI::dbGetQuery(con, sprintf(
+                "SELECT column_name, type, n_rows, n_na, min_val, max_val,
+                        is_integerish, levels_json FROM %s", registry))
+            r$n_unique <- NA_integer_
+            r
+        })
     n <- reg$n_rows[1]
 
     infos <- lapply(seq_len(nrow(reg)), function(i) {
@@ -42,7 +52,10 @@ backend_dbi <- function(con,
         if (r$type == "numeric") {
             list(name = r$column_name, is_numeric = TRUE, n_na = r$n_na,
                  range = c(r$min_val, r$max_val),
-                 is_integerish = isTRUE(r$is_integerish == 1))
+                 is_integerish = isTRUE(r$is_integerish == 1),
+                 n_unique = if (!is.na(r$n_unique)) r$n_unique,
+                 values = if (!is.na(r$levels_json))
+                     as.numeric(jsonlite::fromJSON(r$levels_json)))
         } else {
             list(name = r$column_name, is_numeric = FALSE, n_na = r$n_na,
                  levels = as.character(jsonlite::fromJSON(r$levels_json)))
@@ -89,6 +102,26 @@ backend_dbi <- function(con,
                 if (keep_na) next
                 sprintf("row_id IN (SELECT row_id FROM %s WHERE column_name = %s)",
                         table, vq)
+            } else if (f$is_numeric && is.character(f$val)) {
+                ## discrete numeric (checkbox widget): membership on value_num
+                if (length(f$val) == 0) {
+                    if (keep_na) {
+                        sprintf("row_id NOT IN (SELECT row_id FROM %s WHERE column_name = %s)",
+                                table, vq)
+                    } else "1 = 0"
+                } else {
+                    set <- paste(vapply(as.numeric(f$val), num, character(1)),
+                                 collapse = ", ")
+                    if (keep_na) {
+                        sprintf(paste("row_id NOT IN (SELECT row_id FROM %s",
+                                      "WHERE column_name = %s AND value_num NOT IN (%s))"),
+                                table, vq, set)
+                    } else {
+                        sprintf(paste("row_id IN (SELECT row_id FROM %s",
+                                      "WHERE column_name = %s AND value_num IN (%s))"),
+                                table, vq, set)
+                    }
+                }
             } else if (f$is_numeric) {
                 if (keep_na) {
                     sprintf(paste("row_id NOT IN (SELECT row_id FROM %s",
@@ -152,7 +185,18 @@ backend_dbi <- function(con,
             info <- infos[[name]]
             clauses <- filter_clauses(filters)
             vq <- qs(name)
-            if (info$is_numeric) {
+            if (spec$kind == "cat" && info$is_numeric) {
+                ## discrete numeric: one bar per distinct value
+                res <- DBI::dbGetQuery(con, sprintf(
+                    "SELECT value_num AS lev, COUNT(*) AS cnt
+                     FROM %s WHERE column_name = %s%s
+                     GROUP BY value_num",
+                    table, vq, where_sql(clauses)))
+                counts <- rep(0, spec$nbins)
+                hit <- match(as.character(res$lev), spec$labels)
+                counts[hit[!is.na(hit)]] <- res$cnt[!is.na(hit)]
+                counts
+            } else if (info$is_numeric) {
                 bin_expr <- sprintf(
                     "CAST((value_num - %s) / %s AS INTEGER) + 1",
                     num(spec$origin), num(spec$binwidth))

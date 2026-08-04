@@ -24,7 +24,10 @@ df <- data.frame(
 )
 backend <- backend_memory(df)
 
-testServer(thanosServer, args = list(backend = backend, debounce_ms = 0), {
+## max_discrete_numeric = 0 keeps the 5-unique-value 'num' column on a
+## slider so these blocks exercise classic range semantics
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     max_discrete_numeric = 0), {
     ## select two variables
     session$setInputs(vars = c("num", "cat"))
     m <- session$returned$mask()
@@ -81,6 +84,7 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0), {
 ## opt-in: remember_removed = TRUE restores settings on re-add
 testServer(thanosServer,
            args = list(backend = backend, debounce_ms = 0,
+                       max_discrete_numeric = 0,
                        remember_removed = TRUE), {
     session$setInputs(vars = c("num", "cat"))
     session$setInputs(filter_num = c(2, 4))
@@ -92,6 +96,19 @@ testServer(thanosServer,
     check("remember mode: re-added variable restores its filter",
           identical(session$returned$filters()$num, c(2, 4)) &&
           session$returned$n_selected() == 4)
+})
+
+## discrete numeric: 'num' has 5 unique values, so with the default
+## max_discrete_numeric = 12 it gets checkboxes and MEMBERSHIP semantics
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0), {
+    session$setInputs(vars = "num")
+    session$setInputs(filter_num = c("2", "4"))
+    check("discrete numeric filters by membership (values 2 and 4 + NA)",
+          identical(session$returned$mask(),
+                    c(FALSE, TRUE, FALSE, TRUE, FALSE, TRUE)))
+    session$setInputs(na_num = FALSE)
+    check("discrete numeric membership + exclude NA",
+          identical(session$returned$rows(), c(2L, 4L)))
 })
 
 cat("\nall module tests passed\n")

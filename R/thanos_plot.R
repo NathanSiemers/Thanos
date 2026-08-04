@@ -6,16 +6,20 @@ library(ggplot2)
 
 ## Logical mask for one variable's filter setting.
 ##   x          full column vector (numeric or character)
-##   val        slider range c(lo, hi), a character vector of kept levels,
-##              or NULL meaning "no filter set" (all rows pass)
+##   val        slider range c(lo, hi); a character vector of kept levels
+##              (for categorical columns OR discrete numerics rendered as
+##              checkboxes -- a character val on a numeric x means
+##              membership, not a range); or NULL = "no filter set"
 ##   include_na whether rows with NA in x survive the filter
 make_mask <- function(x, val, include_na = TRUE) {
     if (is.null(val)) {
         ok <- rep(TRUE, length(x))
         return(if (include_na) ok else ok & !is.na(x))
     }
-    if (is.numeric(x)) {
+    if (is.numeric(x) && !is.character(val)) {
         ok <- !is.na(x) & x >= val[1] & x <= val[2]
+    } else if (is.numeric(x)) {
+        ok <- !is.na(x) & as.character(x) %in% val
     } else {
         ok <- !is.na(x) & x %in% val
     }
@@ -26,7 +30,14 @@ make_mask <- function(x, val, include_na = TRUE) {
 ## instead of O(rows): plots only ever tabulate() the precomputed indices.
 ## Fixed breaks over the full-data range also keep the x axis stable while
 ## filtering (the original geom_histogram re-derived breaks per render).
-bin_column <- function(x, bins = 50) {
+bin_column <- function(x, bins = 50, discrete_values = NULL) {
+    ## a numeric column treated as discrete (few unique values, checkbox
+    ## widget) bins like a categorical: one bar per value, in value order
+    if (is.numeric(x) && !is.null(discrete_values)) {
+        labels <- as.character(discrete_values)
+        return(list(kind = "cat", idx = match(as.character(x), labels),
+                    labels = labels, nbins = length(labels)))
+    }
     if (is.numeric(x)) {
         finite <- x[is.finite(x)]
         if (length(finite) == 0) {
@@ -103,7 +114,11 @@ plot_histo <- function(bin, loo, own, var) {
 
 ## Fixed-break bin spec from registry metadata alone (no column vector),
 ## for backends that aggregate in SQL.  Mirrors bin_column()'s geometry.
-bin_spec_from_info <- function(info, bins = 50) {
+bin_spec_from_info <- function(info, bins = 50, discrete = FALSE) {
+    if (discrete && info$is_numeric) {
+        labels <- as.character(info$values)
+        return(list(kind = "cat", labels = labels, nbins = length(labels)))
+    }
     if (info$is_numeric) {
         rng <- info$range
         if (!all(is.finite(rng))) {

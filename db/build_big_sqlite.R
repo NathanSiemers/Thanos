@@ -65,12 +65,19 @@ acc$n <- 0L
 acc$stats <- list()
 bump <- function(col, x, type) {
     s <- acc$stats[[col]] %||% list(type = type, n_na = 0, min = Inf,
-                                    max = -Inf, levels = character(0))
+                                    max = -Inf, levels = character(0),
+                                    vals = numeric(0), too_many = FALSE)
     s$n_na <- s$n_na + sum(is.na(x))
     if (type == "numeric") {
         if (any(!is.na(x))) {
             s$min <- min(s$min, min(x, na.rm = TRUE))
             s$max <- max(s$max, max(x, na.rm = TRUE))
+        }
+        ## track distinct values only until there are too many for a
+        ## checkbox widget to make sense
+        if (!s$too_many) {
+            s$vals <- union(s$vals, unique(x[!is.na(x)]))
+            if (length(s$vals) > 100) s$too_many <- TRUE
         }
     } else {
         s$levels <- union(s$levels, unique(x[!is.na(x)]))
@@ -81,6 +88,8 @@ bump <- function(col, x, type) {
 t_all <- system.time(for (f in months) {
     t_m <- system.time({
         dt <- as.data.table(read_parquet(f))
+        ## some 2023 months capitalize this column ('Airport_fee')
+        setnames(dt, "Airport_fee", "airport_fee", skip_absent = TRUE)
         dt[, trip_minutes := as.numeric(
               difftime(tpep_dropoff_datetime, tpep_pickup_datetime,
                        units = "mins"))]
@@ -121,6 +130,7 @@ dbExecute(con,
          min_val       REAL,
          max_val       REAL,
          is_integerish INTEGER,
+         n_unique      INTEGER,
          levels_json   TEXT
      )")
 for (col in names(acc$stats)) {
@@ -128,12 +138,16 @@ for (col in names(acc$stats)) {
     reg <- if (s$type == "numeric") {
         data.frame(column_name = col, type = "numeric", n_rows = acc$n,
                    n_na = s$n_na, min_val = s$min, max_val = s$max,
-                   is_integerish = NA_integer_, levels_json = NA_character_)
+                   is_integerish = NA_integer_,
+                   n_unique = if (s$too_many) NA_integer_ else length(s$vals),
+                   levels_json = if (!s$too_many && length(s$vals) > 0) {
+                       as.character(jsonlite::toJSON(sort(s$vals)))
+                   } else NA_character_)
     } else {
         data.frame(column_name = col, type = "character", n_rows = acc$n,
                    n_na = s$n_na, min_val = NA_real_, max_val = NA_real_,
-                   is_integerish = NA_integer_,
-                   levels_json = jsonlite::toJSON(sort(s$levels)))
+                   is_integerish = NA_integer_, n_unique = length(s$levels),
+                   levels_json = as.character(jsonlite::toJSON(sort(s$levels))))
     }
     dbWriteTable(con, "column_registry", reg, append = TRUE)
 }

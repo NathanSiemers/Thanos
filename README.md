@@ -50,7 +50,14 @@ Deselecting a column removes its filtering **completely** — the stored
 settings are forgotten too, so there is never a ghost filter from a
 column that is no longer visible. Pass `remember_removed = TRUE` to
 `thanosServer()` if you want a re-added column to restore its previous
-filter (the restriction is then visible in the rebuilt widget).
+filter (the restriction is then visible in the rebuilt widget). A small
+in-page note under the column picker tells users which behavior is
+active (`removal_note = FALSE` hides it).
+
+Numeric columns with few distinct values (`month`, `hour`, ratings…)
+get **checkboxes with membership semantics** instead of a slider; the
+threshold is `thanosServer(max_discrete_numeric = 12)`. Their
+histograms show one bar per value, in numeric order.
 
 ## Two execution modes
 

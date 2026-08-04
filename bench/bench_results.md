@@ -63,3 +63,43 @@ Reading:
   in-memory scan, because it was precomputed at build time.
 - The `(column_name, row_id)` index is what keeps the fetch at ~200 ms
   over a 6.4M-row long table; without it, fetches are full scans.
+
+## 2026-08-04 — Phase D: NYC taxi 2023, 38,310,226 rows, aggregate mode
+
+Identical tall/skinny schema in both engines. `Rscript bench/bench_big.R`.
+
+Build times (12 parquet months, ~607 MB compressed):
+
+| step | SQLite (R melt via arrow/data.table) | DuckDB (all-SQL) |
+|---|---|---|
+| build | 559 s | 94 s |
+| index | 690 s | 64 s |
+| file size | 27.8 GB (460M long rows*) | 5.9 GB (494M long rows) |
+
+*The SQLite build initially missed `airport_fee` for months that name it
+`Airport_fee` (case-sensitive R vs case-insensitive DuckDB); the build
+script now normalizes the name. Benchmark columns were unaffected.
+
+Per-interaction aggregate queries (2 filters active):
+
+| operation | DuckDB | SQLite |
+|---|---|---|
+| get_binned numeric (GROUP BY over filtered rows) | 477 ms | 75.5 s |
+| get_binned categorical | 229 ms | 50.7 s |
+| get_count | 361 ms | 45.1 s |
+| get_column full fetch (38M values) | 3.3 s | 28.3 s |
+| get_row_mask | 0.9 s | 55.5 s |
+
+Reading:
+
+- **DuckDB is the Phase D answer.** Sub-second aggregate queries make
+  the module interactive at 38M rows (with the 500 ms debounce, a
+  slider drag settles in roughly a second per histogram); its columnar,
+  parallel execution fits the tall/skinny row-set intersections.
+- **SQLite does not survive this scale in aggregate mode**: every query
+  is a b-tree walk over hundreds of millions of index entries on one
+  core; 45–75 s per query is two orders of magnitude off. SQLite
+  remains perfectly good as the column-store backend up to roughly
+  flights scale (Phase B numbers above).
+- The same module code drives both; the only change between demo apps
+  is the backend constructor. That was the point of the contract.
