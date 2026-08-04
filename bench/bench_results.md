@@ -37,3 +37,29 @@ Reading:
   **every** widget (renderUI teardown) and re-filtered the full frame per
   plot on every input; the merged module recomputes exactly one mask and
   redraws k plots, nothing else.
+
+## 2026-08-04 — Phase B: memory vs tall/skinny SQLite (flights)
+
+`Rscript bench/bench_backends.R`, db = 6,352,149 long rows, 282 MB.
+
+| operation | memory | sqlite |
+|---|---|---|
+| backend open (registry read) | — | 340 ms |
+| get_column_info, all 19 cols | 322 ms (first scan) | 2.2 ms (registry) |
+| get_column(dep_delay) | ~0 ms | 203 ms |
+| get_column(distance) | ~0 ms | 210 ms |
+| get_column(carrier) | ~0 ms | 227 ms |
+| get_column(dest) | ~0 ms | 231 ms |
+| make_mask on fetched column | 8.5 ms | 8.5 ms (identical) |
+
+Reading:
+
+- Project.md's hypothesis confirmed: the backends differ **only** in the
+  one-time ~200–230 ms column fetch when a variable is first selected.
+  Every per-interaction cost afterwards (masks, leave-one-out, plots) is
+  identical by construction, because the module filters cached columns.
+- The registry pays off immediately: widget metadata (ranges, levels,
+  NA counts) is ~146× faster from the registry than from a first
+  in-memory scan, because it was precomputed at build time.
+- The `(column_name, row_id)` index is what keeps the fetch at ~200 ms
+  over a 6.4M-row long table; without it, fetches are full scans.

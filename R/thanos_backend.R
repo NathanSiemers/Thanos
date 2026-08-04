@@ -31,6 +31,7 @@ backend_memory <- function(df) {
     df[] <- lapply(df, function(x) {
         if (inherits(x, c("POSIXct", "Date"))) as.numeric(x)
         else if (is.factor(x) || is.logical(x)) as.character(x)
+        else if (is.integer(x)) as.numeric(x)  # match SQLite REAL storage
         else x
     })
 
