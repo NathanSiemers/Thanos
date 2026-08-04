@@ -84,3 +84,8 @@ have really good memories about what we have done
 You can clean up the current file and directory structure as you wish.
 The important files are thanos.R and the current testing app.R
 
+We might have a situation where a user removes a column from the "Filter Columns" 
+selector.  What's the right action? I think any filtering for that column should
+be removed so we don't have any ghost filtering going on.  Consider this 
+and make a remedy.
+

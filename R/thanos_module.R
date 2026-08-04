@@ -40,15 +40,30 @@ thanosServer <- function(id, backend,
                          bins = 50,
                          debounce_ms = 300,
                          plot_height = "150px",
-                         max_checkbox_levels = 30) {
+                         max_checkbox_levels = 30,
+                         mode = c("auto", "vector", "aggregate"),
+                         aggregate_threshold = 2e6,
+                         remember_removed = FALSE) {
+    mode <- match.arg(mode)
     moduleServer(id, function(input, output, session) {
         ns <- session$ns
         n_rows <- backend$n_rows()
+        ## vector mode caches full columns and filters in R; aggregate
+        ## mode never fetches columns and asks the backend for binned
+        ## counts via SQL instead -- for data too big to hold as vectors
+        if (mode == "auto") {
+            mode <- if (isTRUE(backend$supports_binned) &&
+                        n_rows > aggregate_threshold) "aggregate" else "vector"
+        }
+        if (mode == "aggregate" && !isTRUE(backend$supports_binned)) {
+            stop("this backend does not support aggregate mode")
+        }
 
         ## non-reactive per-session caches, keyed by column name
         cache <- new.env(parent = emptyenv())
-        cache$col    <- list()  # full column vectors (fetched once per selection)
-        cache$bin    <- list()  # bin_column() results
+        cache$col    <- list()  # full column vectors (vector mode only)
+        cache$bin    <- list()  # bin_column() / bin_spec_from_info() results
+        cache$info   <- list()  # get_column_info() results
         cache$obs    <- list()  # observers to destroy when a var is removed
         cache$seen   <- list()  # TRUE once a checkbox filter has sent a value
         cache$widget <- list()  # "slider" | "checkbox" | "selectize"
@@ -66,11 +81,16 @@ thanosServer <- function(id, backend,
         vid <- function(v) gsub("[^A-Za-z0-9_]", "_", v)
 
         add_var <- function(v) {
-            x <- backend$get_column(v)
             info <- backend$get_column_info(v)
             id <- vid(v)
-            cache$col[[v]] <- x
-            cache$bin[[v]] <- bin_column(x, bins)
+            cache$info[[v]] <- info
+            if (mode == "vector") {
+                x <- backend$get_column(v)
+                cache$col[[v]] <- x
+                cache$bin[[v]] <- bin_column(x, bins)
+            } else {
+                cache$bin[[v]] <- bin_spec_from_info(info, bins)
+            }
             widget <- if (info$is_numeric) "slider"
                       else if (length(info$levels) <= max_checkbox_levels) "checkbox"
                       else "selectize"
@@ -98,7 +118,9 @@ thanosServer <- function(id, backend,
                 if (is.null(val) && widget == "checkbox" && isTRUE(cache$seen[[v]])) {
                     val <- character(0)
                 }
-                maskStore[[v]] <- make_mask(cache$col[[v]], val, keep_na)
+                if (mode == "vector") {
+                    maskStore[[v]] <- make_mask(cache$col[[v]], val, keep_na)
+                }
                 filterState$filters[[v]]   <- val
                 filterState$includeNA[[v]] <- keep_na
             })
@@ -123,13 +145,30 @@ thanosServer <- function(id, backend,
             }
             cache$obs[[v]] <- obs_list
 
-            ## registered ONCE; O(bins) per render thanks to bin_column()
-            output[[paste0("plot_", id)]] <- renderPlot({
-                loo <- looMasks()[[v]]
-                req(!is.null(loo))
-                own <- maskStore[[v]] %||% rep(TRUE, n_rows)
-                plot_histo(cache$bin[[v]], loo, own, v)
-            })
+            ## registered ONCE; O(bins) per render thanks to bin_column(),
+            ## or four SQL aggregate queries in aggregate mode
+            output[[paste0("plot_", id)]] <- if (mode == "vector") {
+                renderPlot({
+                    loo <- looMasks()[[v]]
+                    req(!is.null(loo))
+                    own <- maskStore[[v]] %||% rep(TRUE, n_rows)
+                    plot_histo(cache$bin[[v]], loo, own, v)
+                })
+            } else {
+                renderPlot({
+                    fl <- filtersNow()
+                    req(v %in% names(fl))
+                    spec <- cache$bin[[v]]
+                    loo_f <- fl[setdiff(names(fl), v)]
+                    plot_histo_counts(
+                        spec,
+                        shown = backend$get_binned(v, spec, loo_f),
+                        sel   = backend$get_binned(v, spec, fl),
+                        n_shown = backend$get_count(loo_f),
+                        n_sel   = backend$get_count(fl),
+                        v)
+                })
+            }
         }
 
         remove_var <- function(v) {
@@ -138,11 +177,19 @@ thanosServer <- function(id, backend,
             cache$obs[[v]]    <- NULL
             cache$col[[v]]    <- NULL
             cache$bin[[v]]    <- NULL
+            cache$info[[v]]   <- NULL
             cache$seen[[v]]   <- NULL
             cache$widget[[v]] <- NULL
             maskStore[[v]] <- NULL
-            ## filterState deliberately kept: re-adding the variable
-            ## restores its previous filter settings
+            ## deselecting a column removes its filtering COMPLETELY --
+            ## no ghost filters (Project.md note).  With remember_removed
+            ## = TRUE the settings are kept and restored on re-add; the
+            ## restriction is then visible in the rebuilt widget, never
+            ## silently applied while the column is deselected.
+            if (!remember_removed) {
+                filterState$filters[[v]]   <- NULL
+                filterState$includeNA[[v]] <- NULL
+            }
         }
 
         observeEvent(input$vars, ignoreNULL = FALSE, {
@@ -182,14 +229,37 @@ thanosServer <- function(id, backend,
             structure(loo, global = prefix[[k]])
         })
 
+        ## current filter settings of every active variable, in the shape
+        ## the DBI backends' filter_clauses() expects (aggregate mode)
+        filtersNow <- reactive({
+            vs <- varsNow()
+            fs <- filterState$filters
+            na <- filterState$includeNA
+            out <- lapply(vs, function(v) {
+                list(is_numeric = isTRUE(cache$info[[v]]$is_numeric),
+                     val = fs[[v]],
+                     include_na = na[[v]] %||% TRUE)
+            })
+            names(out) <- vs
+            out
+        })
+
         globalMask <- reactive({
-            attr(looMasks(), "global") %||% rep(TRUE, n_rows)
+            if (mode == "aggregate") {
+                backend$get_row_mask(filtersNow())
+            } else {
+                attr(looMasks(), "global") %||% rep(TRUE, n_rows)
+            }
+        })
+        nSelected <- reactive({
+            if (mode == "aggregate") backend$get_count(filtersNow())
+            else sum(globalMask())
         })
 
         list(
             mask          = globalMask,
             rows          = reactive(which(globalMask())),
-            n_selected    = reactive(sum(globalMask())),
+            n_selected    = nSelected,
             selected_vars = reactive(varsNow()),
             filters       = reactive({
                 fs <- filterState$filters

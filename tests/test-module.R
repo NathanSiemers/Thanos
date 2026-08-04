@@ -60,16 +60,38 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0), {
     check("filters() reports current settings",
           identical(session$returned$filters()$num, c(2, 4)))
 
-    ## deselect num: its filter must stop applying...
+    ## deselect num: its filtering must be removed COMPLETELY -- both the
+    ## active mask and the stored settings (no ghost filters, Project.md)
     session$setInputs(vars = "cat")
     check("removed variable no longer filters",
           session$returned$n_selected() == 6)
     check("selected_vars tracks", identical(session$returned$selected_vars(), "cat"))
+    check("removed variable's stored filter is forgotten (default)",
+          is.null(isolate(session$getReturned()$filters()$num)))
 
-    ## ...but re-adding it restores the stored filter (persistence)
+    ## re-adding comes back unfiltered once the fresh widget reports
+    ## (testServer has no client, so we send the full-range value the
+    ##  rebuilt slider would report)
     session$setInputs(vars = c("cat", "num"))
-    check("re-added variable remembers its stored filter",
-          identical(session$returned$filters()$num, c(2, 4)))
+    session$setInputs(filter_num = c(1, 5), na_num = TRUE)
+    check("re-added variable starts unfiltered",
+          session$returned$n_selected() == 6)
+})
+
+## opt-in: remember_removed = TRUE restores settings on re-add
+testServer(thanosServer,
+           args = list(backend = backend, debounce_ms = 0,
+                       remember_removed = TRUE), {
+    session$setInputs(vars = c("num", "cat"))
+    session$setInputs(filter_num = c(2, 4))
+    check("remember mode: filter applies", session$returned$n_selected() == 4)
+    session$setInputs(vars = "cat")
+    check("remember mode: removed variable still stops filtering",
+          session$returned$n_selected() == 6)
+    session$setInputs(vars = c("cat", "num"))
+    check("remember mode: re-added variable restores its filter",
+          identical(session$returned$filters()$num, c(2, 4)) &&
+          session$returned$n_selected() == 4)
 })
 
 cat("\nall module tests passed\n")
