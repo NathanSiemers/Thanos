@@ -193,6 +193,39 @@ plot_histo <- function(bin, loo, own, var, engine = c("ggplot", "base")) {
                       engine = engine)
 }
 
+## Partition rows by ONE variable's filter outcome, within a universe
+## of rows (the module passes the leave-one-out set: rows passing every
+## OTHER filter).  Returns sorted row-ID vectors:
+##   merged (default):    selected / excluded  -- excluded mirrors the
+##                        mask exactly (NAs land per keep_na, like the
+##                        include-NA checkbox)
+##   split_range = TRUE:  selected / below / above / na  -- range
+##                        filters only (ignored for membership and
+##                        categorical filters); below/above are the
+##                        strict outsides (an infinite bound, i.e. a
+##                        slider handle at its endpoint, leaves that
+##                        side empty); excluded NAs go in `na` because
+##                        they have no side (empty when keep_na keeps
+##                        them inside `selected`)
+## drop_na = TRUE removes rows with NA in x from every stream.
+## Invariants: streams are disjoint and their union is the universe
+## (minus NA rows when drop_na).
+stream_partition <- function(x, val, keep_na = TRUE, universe = NULL,
+                             split_range = FALSE, drop_na = FALSE) {
+    if (is.null(universe)) universe <- rep(TRUE, length(x))
+    if (drop_na) universe <- universe & !is.na(x)
+    sel <- universe & make_mask(x, val, keep_na)
+    ranged <- split_range && !is.null(val) && !is.character(val)
+    if (!ranged) {
+        return(list(selected = which(sel), excluded = which(universe & !sel)))
+    }
+    nn <- universe & !is.na(x)
+    list(selected = which(sel),
+         below = which(nn & x < val[1]),   # x < -Inf is all-FALSE
+         above = which(nn & x > val[2]),
+         na = if (keep_na) integer(0) else which(universe & is.na(x)))
+}
+
 ## Outlier-robust display range for a numeric column: the quantile
 ## bounds when the backend provides them (q_low/q_high, typically 0.1%
 ## and 99.9%), else the true range.  Sliders and histogram breaks use

@@ -189,6 +189,17 @@ server <- function(input, output, session) {
 The module never hands your app a filtered copy of the data; it hands
 you `rows()` (or `mask()`), and you subset whatever you need yourself.
 
+`th$streams(v)` generalizes `rows()` into the leave-one-out partition:
+the rows passing every *other* filter, split by what `v`'s own filter
+did to them — `selected` (== `rows()`) and `excluded`, or with
+`split_range = TRUE` on a range filter `selected`/`below`/`above`/`na`
+(both slider handles set gives three populated rejection streams; a
+handle at its endpoint leaves that side empty). Row IDs, like
+`rows()`: `backend$get_column("fare")[th$streams("dist")$excluded]`
+fetches the fares of trips rejected only by the distance filter.
+`drop_na = TRUE` strips NA rows. The grapher's "show excluded points"
+toggle demonstrates it.
+
 One optional call flows the other way: `th$add_vars(cols)` asks Thanos
 to include columns in its filter selection (additive, idempotent) —
 the grapher uses it to keep its plotted axes filterable, so their NAs

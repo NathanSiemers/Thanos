@@ -137,8 +137,17 @@ ui <- fluidPage(
                                       choices = c("(none)", numeric_cols),
                                       selected = "(none)"))
             ),
+            fluidRow(
+                column(6, checkboxInput("show_excluded",
+                    "show points excluded by the x column's filter",
+                    value = FALSE)),
+                column(6, checkboxInput("fit_slopes",
+                    "fit linear slopes", value = TRUE))
+            ),
             plotOutput("scatter", height = "500px"),
-            textOutput("counts")
+            textOutput("counts"),
+            ## slope estimates + the selected-vs-excluded slope test
+            verbatimTextOutput("slopes")
         )
     )
 )
@@ -236,6 +245,31 @@ server <- function(input, output, session) {
         df[keep, , drop = FALSE]
     })
 
+    ############################################################
+    ## INTERACTION, part 2b (optional): STREAMS -- the leave-one-out
+    ## partition.  th$streams(v) hands back row IDs partitioned by what
+    ## v's OWN filter did to them, while every other filter still
+    ## applies to all streams:
+    ##   $selected  passed v's filter too (identical to th$rows())
+    ##   $excluded  rejected ONLY by v's filter
+    ## (split_range = TRUE further splits a range filter's rejects into
+    ##  $below / $above; drop_na = TRUE strips NA-in-v rows.)
+    ## Here: when the toggle is on, the points the x column's filter
+    ## rejected are drawn as an equally-valid second population in the
+    ## module's own sel/unsel plasma pair (magenta), under the
+    ## survivors.  Empty until x has an active filter in the Thanos
+    ## panel.
+    ############################################################
+    excluded_data <- reactive({
+        if (!isTRUE(input$show_excluded)) return(NULL)
+        ex <- th$streams(input$x, drop_na = TRUE)$excluded
+        if (length(ex) == 0) return(NULL)
+        if (length(ex) > PLOT_CAP) ex <- sort(sample(ex, PLOT_CAP))
+        df <- data.frame(x = backend$get_column(input$x)[ex],
+                         y = backend$get_column(input$y)[ex])
+        df[complete.cases(df), , drop = FALSE]
+    })
+
     ## From here down: 100% ordinary grapher code.  It has no idea
     ## Thanos exists; it just renders whatever plot_data() holds.
     output$scatter <- renderPlot({
@@ -244,8 +278,42 @@ server <- function(input, output, session) {
         aes_args <- list(x = as.name(input$x), y = as.name(input$y))
         if (input$color != "(none)") aes_args$colour <- as.name(input$color)
         if (input$size  != "(none)") aes_args$size   <- as.name(input$size)
-        p <- ggplot(df, do.call(aes, aes_args)) +
+        p <- ggplot(df, do.call(aes, aes_args))
+        ed <- excluded_data()
+        ## the two populations wear the module's plasma sel/unsel pair
+        sel_col <- "#0D0887"; exc_col <- "#9C179E"
+        if (!is.null(ed) && nrow(ed) > 0) {
+            ## excluded population first, so survivors draw on top.
+            ## Redundant encodings keep the two sets unmistakable even
+            ## when the survivors are color-mapped by a variable:
+            ## excluded = hollow magenta circles, selected = solid.
+            p <- p + geom_point(data = ed, aes(x = x, y = y),
+                                colour = exc_col, shape = 1, alpha = 0.4,
+                                inherit.aes = FALSE)
+        }
+        p <- p + if (input$color == "(none)") {
+            ## no color mapping: survivors wear the plasma blue so they
+            ## pair with their slope line and contrast the magenta
+            geom_point(alpha = 0.4, colour = sel_col)
+        } else {
             geom_point(alpha = 0.4)
+        }
+        ## slopes: ONE line per population (not per color group), so the
+        ## smooths get their own fixed aes and ignore the point layers'
+        if (isTRUE(input$fit_slopes) && nrow(df) >= 3) {
+            p <- p + geom_smooth(
+                data = df,
+                aes(x = .data[[input$x]], y = .data[[input$y]]),
+                method = "lm", formula = y ~ x, se = FALSE,
+                colour = sel_col, linewidth = 1, inherit.aes = FALSE)
+        }
+        if (isTRUE(input$fit_slopes) && !is.null(ed) && nrow(ed) >= 3) {
+            p <- p + geom_smooth(
+                data = ed, aes(x = x, y = y),
+                method = "lm", formula = y ~ x, se = FALSE,
+                colour = exc_col, linetype = "dashed", linewidth = 1,
+                inherit.aes = FALSE)
+        }
         if (input$color != "(none)") {
             p <- p + if (backend$get_column_info(input$color)$is_numeric) {
                 scale_color_viridis_c(option = "plasma", end = 0.85)
@@ -270,9 +338,57 @@ server <- function(input, output, session) {
             sprintf("; %s not drawn (NA in a plotted column)",
                     format(n_na, big.mark = ","))
         } else ""
-        sprintf("%s of %s rows pass filters%s%s",
+        ed <- excluded_data()
+        ex_note <- if (!is.null(ed) && nrow(ed) > 0) {
+            sprintf("; %s excluded by the %s filter shown as hollow magenta points",
+                    format(nrow(ed), big.mark = ","), input$x)
+        } else ""
+        sprintf("%s of %s rows pass filters%s%s%s",
                 format(n_sel, big.mark = ","),
-                format(backend$n_rows(), big.mark = ","), capped, na_note)
+                format(backend$n_rows(), big.mark = ","), capped, na_note,
+                ex_note)
+    })
+
+    ## Rudimentary slope comparison: y ~ x fit within each population,
+    ## then an interaction model y ~ x * population whose x:population
+    ## coefficient IS the slope difference (its t test answers "do the
+    ## two populations have different slopes?").  Fits use the plotted
+    ## (possibly sampled) points.
+    output$slopes <- renderText({
+        if (!isTRUE(input$fit_slopes)) return("")
+        req(input$x, input$y)
+        df <- plot_data()
+        xs <- df[[input$x]]; ys <- df[[input$y]]
+        if (length(xs) < 3) return("too few selected points for a linear fit")
+        cs <- summary(lm(ys ~ xs))$coefficients
+        line_sel <- sprintf("selected:   slope = %.4g ± %.2g   (n = %s)",
+                            cs["xs", 1], cs["xs", 2],
+                            format(length(xs), big.mark = ","))
+        ed <- excluded_data()
+        if (is.null(ed) || nrow(ed) < 3) {
+            return(paste0(line_sel, "\n(turn on the excluded-points toggle,",
+                          " with an active filter on ", input$x,
+                          ", to compare slopes)"))
+        }
+        ce <- summary(lm(y ~ x, data = ed))$coefficients
+        line_exc <- sprintf("excluded:   slope = %.4g ± %.2g   (n = %s)",
+                            ce["x", 1], ce["x", 2],
+                            format(nrow(ed), big.mark = ","))
+        both <- data.frame(
+            x = c(xs, ed$x), y = c(ys, ed$y),
+            grp = factor(rep(c("selected", "excluded"),
+                             c(length(xs), nrow(ed))),
+                         levels = c("excluded", "selected")))
+        ci <- summary(lm(y ~ x * grp, data = both))$coefficients
+        est <- ci["x:grpselected", ]
+        pv <- format.pval(est[[4]], digits = 3, eps = 1e-16)
+        pv <- if (grepl("^<", pv)) paste("p", pv) else paste("p =", pv)
+        verdict <- if (est[[4]] < 0.05) "the slopes differ" else
+                   "no significant slope difference"
+        line_diff <- sprintf(
+            "difference: %.4g (selected − excluded), t = %.3g, %s  →  %s",
+            est[[1]], est[[3]], pv, verdict)
+        paste(line_sel, line_exc, line_diff, sep = "\n")
     })
 }
 

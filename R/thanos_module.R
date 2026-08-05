@@ -15,6 +15,10 @@
 ##     $n_selected()     sum(mask())
 ##     $selected_vars()  currently selected column names
 ##     $filters()        named list of current filter values (save/restore)
+##     $streams(v, ...)  leave-one-out row streams: rows passing every
+##                       OTHER filter, partitioned by v's own filter
+##                       (selected/excluded, or selected/below/above/na
+##                       with split_range = TRUE on a range filter)
 ##     $add_vars(cols)   parent -> module: ensure these columns appear in
 ##                       the filter selection (adds panels for any not
 ##                       already selected; never removes; unknown column
@@ -128,6 +132,18 @@ thanosUI <- function(id, width = "100%") {
 #'     \item{`selected_vars()`}{reactive: currently selected columns}
 #'     \item{`filters()`}{reactive: named list of current filter values
 #'       in raw units (save/restore, bookmarking)}
+#'     \item{`streams(v, split_range = FALSE, drop_na = FALSE)`}{function:
+#'       leave-one-out row streams for column `v` -- the rows passing
+#'       every *other* filter, partitioned by what `v`'s own filter did
+#'       to them. Returns sorted row-ID vectors: `selected` (also passes
+#'       `v`'s filter; identical to `rows()` when `v` is selected) and
+#'       `excluded`, or with `split_range = TRUE` on a range filter
+#'       `selected`/`below`/`above`/`na` (rejects split by side; a
+#'       slider handle at its endpoint leaves that side empty; excluded
+#'       NAs, having no side, land in `na`). NA rows follow the
+#'       include-NA checkbox like the mask; `drop_na = TRUE` removes
+#'       them from every stream. Fetch data as
+#'       `backend$get_column(v)[ids]`.}
 #'     \item{`add_vars(cols)`}{function: ensure these columns appear in
 #'       the filter selection (additive, idempotent)}
 #'   }
@@ -547,6 +563,74 @@ thanosServer <- function(id, backend,
                 fs <- filterState$filters
                 fs[intersect(names(fs), varsNow())]
             }),
+            ## Leave-one-out row streams for one column: partition the
+            ## rows passing every OTHER filter by what this column's own
+            ## filter did to them.  selected == rows() whenever v is a
+            ## selected column; with split_range = TRUE a range filter's
+            ## rejects are split into below/above (see stream_partition
+            ## in thanos_plot.R for the exact semantics).  Row IDs only,
+            ## like rows(): fetch data as backend$get_column(v)[ids].
+            ## Reads the module's reactives, so parent reactives using
+            ## it auto-update.  Works for ANY backend column, selected
+            ## in Thanos or not.
+            streams       = function(v, split_range = FALSE, drop_na = FALSE) {
+                if (!v %in% all_columns) stop("unknown column: ", v)
+                st <- cache$var[[v]]
+                if (mode == "vector") {
+                    universe <- if (!is.null(st)) {
+                        looMasks()[[v]] %||% rep(TRUE, n_rows)
+                    } else globalMask()
+                    x <- if (!is.null(st)) st$col else backend$get_column(v)
+                    val <- if (!is.null(st)) filterState$filters[[v]]
+                    keep_na <- if (!is.null(st)) {
+                        filterState$includeNA[[v]] %||% TRUE
+                    } else TRUE
+                    return(stream_partition(x, val, keep_na, universe,
+                                            split_range, drop_na))
+                }
+                ## aggregate mode: composed from the existing memoised
+                ## mask queries -- no new SQL.  Strict below/above come
+                ## from complements of closed one-sided ranges, so
+                ## boundaries match the vector path exactly.
+                fl <- filtersNow()
+                loo_f <- fl[setdiff(names(fl), v)]
+                own_f <- fl[[v]]
+                uni_m <- backend$get_row_mask(loo_f)
+                sel_m <- backend$get_row_mask(fl) & uni_m
+                with_v <- function(f) {
+                    loo_f[[v]] <- f
+                    loo_f
+                }
+                pres_m <- backend$get_row_mask(with_v(list(
+                    is_numeric = TRUE, val = NULL, include_na = FALSE)))
+                if (drop_na) {
+                    uni_m <- uni_m & pres_m
+                    sel_m <- sel_m & pres_m
+                }
+                ranged <- split_range && !is.null(own_f) &&
+                    !is.character(own_f$val)
+                if (!ranged) {
+                    return(list(selected = which(sel_m),
+                                excluded = which(uni_m & !sel_m)))
+                }
+                lo <- own_f$val[1]; hi <- own_f$val[2]
+                ge_lo <- if (is.finite(lo)) {
+                    backend$get_row_mask(with_v(list(
+                        is_numeric = TRUE, val = c(lo, Inf),
+                        include_na = FALSE)))
+                } else pres_m
+                le_hi <- if (is.finite(hi)) {
+                    backend$get_row_mask(with_v(list(
+                        is_numeric = TRUE, val = c(-Inf, hi),
+                        include_na = FALSE)))
+                } else pres_m
+                keep_na <- isTRUE(own_f$include_na)
+                list(selected = which(sel_m),
+                     below = which(uni_m & pres_m & !ge_lo),
+                     above = which(uni_m & pres_m & !le_hi),
+                     na = if (keep_na || drop_na) integer(0)
+                          else which(uni_m & !pres_m))
+            },
             ## parent -> module: add columns to the filter selection.
             ## Purely additive and idempotent; the update round-trips
             ## through the selectize, so panels appear via the normal

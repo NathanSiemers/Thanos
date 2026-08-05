@@ -70,6 +70,14 @@ capture/compare harness that freezes the behavior of every layer.
   `bin_column()` (with row indices, vector mode) or
   `bin_spec_from_info()` (metadata only, aggregate mode). The two
   produce the same geometry for the same column.
+- **streams**: `th$streams(v, split_range, drop_na)` partitions the
+  rows passing every *other* filter by what `v`'s own filter did to
+  them: `selected`/`excluded` (mirroring the mask, NAs per the
+  include-NA checkbox; `selected` == `rows()` when `v` is selected),
+  or `selected`/`below`/`above`/`na` for a range filter with
+  `split_range = TRUE`. Row IDs only; vector mode partitions cached
+  columns (`stream_partition`), aggregate mode composes the existing
+  memoised mask queries — no new SQL.
 - **counts**: `list(shown, sel, n_shown, n_sel)` — per-bin counts of
   rows passing all *other* filters, the subset also passing this
   variable's own filter, and the two row totals for the title.

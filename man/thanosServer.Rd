@@ -75,6 +75,18 @@ all filters}
 \item{\code{selected_vars()}}{reactive: currently selected columns}
 \item{\code{filters()}}{reactive: named list of current filter values
 in raw units (save/restore, bookmarking)}
+\item{\code{streams(v, split_range = FALSE, drop_na = FALSE)}}{function:
+leave-one-out row streams for column \code{v} -- the rows passing
+every \emph{other} filter, partitioned by what \code{v}'s own filter did
+to them. Returns sorted row-ID vectors: \code{selected} (also passes
+\code{v}'s filter; identical to \code{rows()} when \code{v} is selected) and
+\code{excluded}, or with \code{split_range = TRUE} on a range filter
+\code{selected}/\code{below}/\code{above}/\code{na} (rejects split by side; a
+slider handle at its endpoint leaves that side empty; excluded
+NAs, having no side, land in \code{na}). NA rows follow the
+include-NA checkbox like the mask; \code{drop_na = TRUE} removes
+them from every stream. Fetch data as
+\code{backend$get_column(v)[ids]}.}
 \item{\code{add_vars(cols)}}{function: ensure these columns appear in
 the filter selection (additive, idempotent)}
 }
