@@ -98,9 +98,16 @@ thanosServer <- function(id, backend,
         cache <- new.env(parent = emptyenv())
         cache$var <- list()
 
+        ## INVALIDATION DISCIPLINE (see design.md): every write below is
+        ## equality-gated -- a value that did not change is never written,
+        ## so no-op events (initial widget reports, adding an unfiltered
+        ## column, re-sending the same value, our own slider echoes)
+        ## invalidate nothing downstream.
         maskStore   <- reactiveValues()  # var -> logical(n_rows), vector mode
-        filterState <- reactiveValues(filters = list(), includeNA = list(),
-                                      log = list())
+        filterState <- reactiveValues(filters = list(), includeNA = list())
+        logState    <- reactiveValues() # var -> TRUE when log2 display is on
+                                        # (one KEY per var, so a toggle
+                                        #  invalidates exactly one plot)
         varsNow     <- reactiveVal(character(0))
 
         ## one-line in-page note (Project.md): tell the user what removing
@@ -124,7 +131,7 @@ thanosServer <- function(id, backend,
         vid <- function(v) gsub("[^A-Za-z0-9_]", "_", v)
 
         plot_label <- function(v) {
-            if (isTRUE(filterState$log[[v]])) paste0(v, " (log2+1)") else v
+            if (isTRUE(logState[[v]])) paste0(v, " (log2+1)") else v
         }
 
         ## where a plot's counts come from is the ONLY per-mode decision
@@ -139,8 +146,11 @@ thanosServer <- function(id, backend,
             }
         } else {
             function(v) {
+                ## non-reactive existence guard: a removed variable's
+                ## stale render is simply stopped, and live plots gain
+                ## no dependency on the selection structure itself
+                req(!is.null(cache$var[[v]]))
                 fl <- filtersNow()   # normalized: no-op filters absent
-                req(v %in% varsNow())
                 own_f <- fl[[v]]     # NULL when v's filter is inactive
                 loo_f <- fl[setdiff(names(fl), v)]
                 ## one combined query for both count vectors; the global
@@ -190,10 +200,11 @@ thanosServer <- function(id, backend,
 
             stored     <- isolate(filterState$filters[[v]])
             stored_na  <- isolate(filterState$includeNA[[v]]) %||% TRUE
-            stored_log <- can_log && isTRUE(isolate(filterState$log[[v]]))
+            stored_log <- can_log && isTRUE(isolate(logState[[v]]))
 
             st <- list(info = info, widget = widget, discrete = discrete,
                        can_log = can_log, seen = FALSE,
+                       log_active = stored_log,
                        col = if (mode == "vector") backend$get_column(v),
                        slider = if (widget == "slider")
                                     slider_bounds(info, log2p1 = stored_log))
@@ -226,39 +237,83 @@ thanosServer <- function(id, backend,
                     isTRUE(cache$var[[v]]$seen)) {
                     val <- character(0)
                 }
-                ## a slider handle AT an endpoint means "unbounded on that
-                ## side": the visible range is outlier-robust (quantile
-                ## bounds), so endpoints must not silently drop the tails
                 if (!is.null(val) && widget == "slider") {
+                    ## a log2 toggle repositions the slider to the SAME raw
+                    ## filter; that update echoes back here and must not be
+                    ## mistaken for user intent (echo = the value we
+                    ## predicted, within slider-step quantization)
+                    echo <- cache$var[[v]]$echo
+                    if (!is.null(echo)) {
+                        cache$var[[v]]$echo <- NULL
+                        sb <- cache$var[[v]]$slider
+                        if (all(abs(val - echo) <= sb$step / 2 + 1e-9)) return()
+                    }
+                    ## a slider handle AT an endpoint means "unbounded on
+                    ## that side": the visible range is outlier-robust
+                    ## (quantile bounds), so endpoints must not silently
+                    ## drop the tails
                     sb <- cache$var[[v]]$slider
                     if (val[1] <= sb$lo + sb$step / 2) val[1] <- -Inf
                     if (val[2] >= sb$hi - sb$step / 2) val[2] <- Inf
                     ## with the log2 transform active the slider lives in
-                    ## log space; the FILTER is always stored in raw units
-                    if (can_log && isTRUE(input[[paste0("log_", id)]])) {
+                    ## log space; the FILTER is always stored in raw units.
+                    ## The slider's scale is module state (log_active, set
+                    ## by obs_log), NOT a reactive read of the checkbox --
+                    ## otherwise the toggle would re-run this observer
+                    ## against the stale slider value and corrupt the
+                    ## filter before the repositioned slider reports.
+                    if (isTRUE(cache$var[[v]]$log_active)) {
                         val <- ifelse(is.finite(val), 2^val - 1, val)
                     }
                 }
+                ## equality-gated writes: unchanged values propagate nothing
                 if (mode == "vector") {
-                    maskStore[[v]] <- make_mask(cache$var[[v]]$col, val, keep_na)
+                    new_mask <- make_mask(cache$var[[v]]$col, val, keep_na)
+                    old_mask <- isolate(maskStore[[v]])
+                    ## an absent entry already means "all pass" downstream
+                    if (!(is.null(old_mask) && all(new_mask)) &&
+                        !identical(new_mask, old_mask)) {
+                        maskStore[[v]] <- new_mask
+                    }
                 }
-                filterState$filters[[v]]   <- val
-                filterState$includeNA[[v]] <- keep_na
+                if (!identical(val, isolate(filterState$filters[[v]]))) {
+                    filterState$filters[[v]] <- val
+                }
+                if (!identical(keep_na,
+                               isolate(filterState$includeNA[[v]]) %||% TRUE)) {
+                    filterState$includeNA[[v]] <- keep_na
+                }
             })
             obs_list <- list(obs_mask)
 
             if (can_log) {
-                ## toggling the transform rebins the column and rescales
-                ## the slider; the filter resets to "no restriction"
+                ## toggling the transform is DISPLAY-only: the column is
+                ## rebinned on the new scale and the slider repositioned,
+                ## but the filter KEEPS its raw-unit value -- so no other
+                ## plot's inputs change and exactly ONE plot re-renders
+                ## (with one query in aggregate mode, none in vector mode)
                 obs_log <- observeEvent(input[[paste0("log_", id)]], {
                     use_log <- isTRUE(input[[paste0("log_", id)]])
-                    filterState$log[[v]] <- use_log
+                    if (identical(isTRUE(cache$var[[v]]$log_active), use_log)) {
+                        return()   # no scale change (e.g. widget re-report)
+                    }
+                    cache$var[[v]]$log_active <- use_log
+                    logState[[v]] <- use_log
                     cache$var[[v]]$bin <- build_bin(cache$var[[v]], use_log)
                     sb <- slider_bounds(info, log2p1 = use_log)
                     cache$var[[v]]$slider <- sb
+                    ## show the CURRENT raw filter at its position on the
+                    ## new scale (endpoints stand for +/-Inf as usual)
+                    raw <- isolate(filterState$filters[[v]])
+                    disp <- if (is.null(raw)) c(sb$lo, sb$hi) else {
+                        d <- if (use_log) log2(raw + 1) else raw
+                        c(if (is.finite(d[1])) max(d[1], sb$lo) else sb$lo,
+                          if (is.finite(d[2])) min(d[2], sb$hi) else sb$hi)
+                    }
+                    cache$var[[v]]$echo <- disp  # our own update: suppress it
                     updateSliderInput(session, paste0("filter_", id),
                                       min = sb$lo, max = sb$hi,
-                                      value = c(sb$lo, sb$hi), step = sb$step)
+                                      value = disp, step = sb$step)
                 }, ignoreInit = TRUE)
                 obs_list <- c(obs_list, list(obs_log))
             }
@@ -283,10 +338,24 @@ thanosServer <- function(id, backend,
             cache$var[[v]]$obs <- obs_list
 
             ## registered ONCE per variable; O(bins) per render in vector
-            ## mode, a couple of memoised SQL queries in aggregate mode
-            output[[paste0("plot_", id)]] <- renderPlot({
+            ## mode, a couple of memoised SQL queries in aggregate mode.
+            ## PARSIMONY CHECK: even when upstream reactives invalidate,
+            ## a plot whose content (counts + geometry + label + pixel
+            ## size) is unchanged keeps its previous image instead of
+            ## repainting -- req(cancelOutput) is Shiny's mechanism for
+            ## exactly that.
+            plot_id <- paste0("plot_", id)
+            output[[plot_id]] <- renderPlot({
                 ct <- counts_for(v)
-                plot_histo_counts(cache$var[[v]]$bin, ct$shown, ct$sel,
+                bin <- cache$var[[v]]$bin
+                key <- list(ct, bin[setdiff(names(bin), "idx")], plot_label(v),
+                            session$clientData[[paste0("output_", ns(plot_id), "_width")]],
+                            session$clientData[[paste0("output_", ns(plot_id), "_height")]])
+                if (identical(key, cache$var[[v]]$last_render)) {
+                    req(FALSE, cancelOutput = TRUE)
+                }
+                cache$var[[v]]$last_render <- key
+                plot_histo_counts(bin, ct$shown, ct$sel,
                                   ct$n_shown, ct$n_sel, plot_label(v),
                                   engine = plot_engine)
             })
@@ -305,7 +374,7 @@ thanosServer <- function(id, backend,
             if (!remember_removed) {
                 filterState$filters[[v]]   <- NULL
                 filterState$includeNA[[v]] <- NULL
-                filterState$log[[v]]       <- NULL
+                logState[[v]]              <- NULL
             }
         }
 
@@ -314,7 +383,7 @@ thanosServer <- function(id, backend,
             old_vars <- varsNow()
             for (v in setdiff(old_vars, new_vars)) remove_var(v)
             for (v in setdiff(new_vars, old_vars)) add_var(v)
-            varsNow(new_vars)
+            if (!identical(new_vars, old_vars)) varsNow(new_vars)
         })
 
         ## all leave-one-out masks + the global mask in one pass:
@@ -347,11 +416,15 @@ thanosServer <- function(id, backend,
         })
 
         ## current filter settings of every active variable, in the shape
-        ## the DBI backends' filter_clauses() expects, NORMALIZED:
-        ## entries that impose no restriction are dropped so that no-op
-        ## widget states can neither add SQL clauses nor perturb query
-        ## cache keys (the demo_big replot-on-add / queue pile-up bug)
-        filtersNow <- reactive({
+        ## the DBI backends' filter_clauses() expects, NORMALIZED (no-op
+        ## entries dropped so they can neither add SQL clauses nor perturb
+        ## query cache keys) and EQUALITY-GATED: a reactiveVal updated
+        ## only when the canonical content actually changes, so events
+        ## that leave the effective filter state alone (initial widget
+        ## reports, adding an unfiltered column, slider echoes) invalidate
+        ## none of the plots reading it
+        filtersNow <- reactiveVal(list())
+        observe({
             vs <- varsNow()
             fs <- filterState$filters
             na <- filterState$includeNA
@@ -361,7 +434,8 @@ thanosServer <- function(id, backend,
                      include_na = na[[v]] %||% TRUE)
             })
             names(out) <- vs
-            normalize_filters(out, lapply(cache$var, `[[`, "info"))
+            out <- normalize_filters(out, lapply(cache$var, `[[`, "info"))
+            if (!identical(out, isolate(filtersNow()))) filtersNow(out)
         })
 
         globalMask <- reactive({

@@ -111,6 +111,25 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0, debounc
           identical(session$returned$rows(), c(2L, 4L)))
 })
 
+## log2 toggle is display-only: an ACTIVE filter is preserved in raw
+## units (the slider is repositioned, the filter itself never changes)
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     max_discrete_numeric = 0), {
+    session$setInputs(vars = "num")
+    session$setInputs(filter_num = c(2, 4))
+    check("filter active before toggle", session$returned$n_selected() == 4)
+    session$setInputs(log_num = TRUE)
+    check("log toggle preserves the raw filter value",
+          identical(session$returned$filters()$num, c(2, 4)))
+    check("log toggle changes no results",
+          session$returned$n_selected() == 4)
+    session$setInputs(log_num = FALSE)
+    check("toggling back still preserves the filter",
+          identical(session$returned$filters()$num, c(2, 4)) &&
+          session$returned$n_selected() == 4)
+})
+
 ## log2(x+1) transform: slider moves to log space, filters stay raw
 testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
                                      debounce_checkbox_ms = 0,

@@ -96,6 +96,35 @@ server start: `counts_for()` (where do histogram counts come from) and
 the mask/count accessors. Everything else — widgets, observers,
 lifecycle, rendering — is one shared code path.
 
+### Invalidation discipline (2026-08-05 addendum)
+
+Reactive invalidation is treated as a cost like any query, governed by
+three rules:
+
+1. **Never write an unchanged value.** Every reactive write is
+   equality-gated (`maskStore`, `filterState` entries, `filtersNow`,
+   `varsNow`), so no-op events — initial widget reports, adding an
+   unfiltered column, re-sending the same value, the module's own
+   slider echoes — propagate nothing downstream.
+2. **Never read broader state than needed.** Each plot's label reads
+   its own `logState[[v]]` key, not a shared list; the slider's scale
+   is module state (`log_active`), not a reactive read of the log
+   checkbox (which would re-run the filter observer against a stale
+   slider value); aggregate `counts_for` guards on non-reactive
+   existence instead of the selection structure.
+3. **A plot that would paint the same pixels doesn't paint.** Each
+   render compares (counts, bin geometry, label, pixel size) against
+   what it last drew and cancels via `req(cancelOutput = TRUE)` when
+   identical — the checksum backstop for invalidations the gates
+   can't prevent.
+
+Consequences worth naming: the log2 toggle is display-local — it
+preserves the filter in raw units (the slider is repositioned onto the
+new scale, its echo recognized by prediction and suppressed), so it
+re-renders exactly one plot at the cost of one aggregate query (zero
+in vector mode) — and a k-plot page only ever re-renders the plots
+whose content changed.
+
 Per-variable lifecycle state lives in **one object**
 (`cache$var[[v]]`: info, widget kind, bin, cached column, slider
 bounds, observers, flags), created whole by `add_var()` and deleted

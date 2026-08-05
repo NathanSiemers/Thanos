@@ -167,6 +167,45 @@ if (requireNamespace("duckdb", quietly = TRUE)) {
                            as.numeric(tabulate(bin_log$idx[loo_m],
                                                nbins = 25)))))
     bd$disconnect()
+
+    ## query locality: no-op inputs and a log2 toggle must not re-query
+    ## other plots.  counts_for is the module's per-plot data provider;
+    ## calling it directly stands in for the plots rendering, and the
+    ## backend's miss counter tells us exactly what hit the database.
+    scon2 <- dbConnect(RSQLite::SQLite(), db_path)
+    dcon2 <- dbConnect(duckdb::duckdb())
+    dbWriteTable(dcon2, "long_data", dbReadTable(scon2, "long_data"))
+    dbWriteTable(dcon2, "column_registry", dbReadTable(scon2, "column_registry"))
+    dbDisconnect(scon2)
+    bd2 <- backend_dbi(dcon2)
+    ## (in testServer, renderPlot outputs execute during each flush, so
+    ## the backend's miss counter measures exactly what a flush queried)
+    testServer(thanosServer,
+               args = list(backend = bd2, debounce_ms = 0,
+                           debounce_checkbox_ms = 0, mode = "aggregate"), {
+        session$setInputs(vars = c("a", "g"))
+        session$setInputs(filter_g = c("p", "q"))
+        invisible(counts_for("a")); invisible(counts_for("g"))
+        n0 <- session$returned$n_selected()
+        m0 <- bd2$cache_stats()$misses
+        ## re-sending the identical value is a no-op end to end: the
+        ## equality gates stop it before any plot or query is touched
+        session$setInputs(filter_g = c("p", "q"))
+        check("no-op input triggers zero new queries",
+              bd2$cache_stats()$misses == m0)
+        ## log2 toggle on 'a' is display-local: the flush costs exactly
+        ## ONE new query (a's rebinned pair query); plot g is not even
+        ## invalidated, and a's n_shown reuses the shared global count
+        session$setInputs(log_a = TRUE)
+        check("log toggle costs exactly one query, for the toggled plot only",
+              bd2$cache_stats()$misses == m0 + 1)
+        invisible(counts_for("g")); invisible(counts_for("a"))
+        check("all post-toggle plot data comes from cache",
+              bd2$cache_stats()$misses == m0 + 1)
+        check("results unchanged through the toggle",
+              session$returned$n_selected() == n0)
+    })
+    bd2$disconnect()
 }
 be$disconnect()
 cat("\nall aggregate-mode tests passed\n")
