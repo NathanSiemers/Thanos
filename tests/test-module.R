@@ -156,4 +156,27 @@ p_nona <- as.character(make_var_panel(
 check("column without NAs gets no include-NA checkbox",
       !grepl("na_nona", p_nona))
 
+## normalize_filters: no-op entries dropped, restrictive ones kept
+infos <- list(
+    num = list(is_numeric = TRUE),
+    cat = list(is_numeric = FALSE, levels = c("x", "y", "z")),
+    dsc = list(is_numeric = TRUE, levels = c("1", "2", "3"))
+)
+fl <- list(
+    num = list(is_numeric = TRUE, val = c(-Inf, Inf), include_na = TRUE),
+    cat = list(is_numeric = FALSE, val = c("x", "y", "z"), include_na = TRUE),
+    dsc = list(is_numeric = TRUE, val = c("1", "2", "3"), include_na = TRUE)
+)
+check("fully unbounded / full-set filters normalize away",
+      length(normalize_filters(fl, infos)) == 0)
+fl$num$val <- c(2, Inf)
+fl$cat$val <- c("x")
+fl$dsc$include_na <- FALSE
+check("half-open range, level subset, and NA-exclusion all kept",
+      setequal(names(normalize_filters(fl, infos)), c("num", "cat", "dsc")))
+check("NULL val with include-NA on normalizes away",
+      length(normalize_filters(
+          list(num = list(is_numeric = TRUE, val = NULL,
+                          include_na = TRUE)), infos)) == 0)
+
 cat("\nall module tests passed\n")

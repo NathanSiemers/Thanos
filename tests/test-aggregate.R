@@ -134,6 +134,19 @@ check("module n_selected identical in aggregate and vector modes",
 check("module rows() identical in aggregate and vector modes",
       identical(agg$rows, vec$rows))
 
+## normalization end to end: full-range / full-set inputs behave as
+## "no filter" -- n_selected is the whole table, and rows() needs no
+## clauses (would equal a filterless mask)
+testServer(thanosServer,
+           args = list(backend = be, debounce_ms = 0,
+                       debounce_checkbox_ms = 0, mode = "aggregate"), {
+    session$setInputs(vars = c("a", "g"))
+    session$setInputs(filter_a = c(-Inf, Inf), filter_g = c("p", "q", "r"))
+    check("no-op filters normalize to 'everything passes' (aggregate)",
+          session$returned$n_selected() == nrow(df) &&
+          all(session$returned$mask()))
+})
+
 ## log2(x+1) SQL binning: RSQLite lacks log2(), so this path is verified
 ## against DuckDB over the same tall/skinny fixture
 check("sqlite backend reports missing log2 support",

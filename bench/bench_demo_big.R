@@ -72,13 +72,17 @@ normalize <- function(st) {
     st[keep]
 }
 
-## one full module interaction over filter state `st` for plots `vars`
+## one full module interaction over filter state `st` for plots `vars`.
+## canonical = FALSE replays the PRE-FIX module (every entry in every
+## key, a loo count per plot); canonical = TRUE replays the module
+## SINCE the fix: normalized keys, and the loo count skipped for plots
+## whose own filter is inactive (their n_shown is the shared global)
 cascade <- function(vars, st, canonical = FALSE) {
     if (canonical) st <- normalize(st)
     for (v in vars) {
         loo <- st[setdiff(names(st), v)]
         be$get_binned_pair(v, specs[[v]], loo, st[[v]])
-        be$get_count(loo)
+        if (!canonical || !is.null(st[[v]])) be$get_count(loo)
     }
     be$get_count(st)
     invisible()

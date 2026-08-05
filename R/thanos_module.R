@@ -285,15 +285,23 @@ thanosServer <- function(id, backend,
                 })
             } else {
                 renderPlot({
-                    fl <- filtersNow()
-                    req(v %in% names(fl))
+                    fl <- filtersNow()   # normalized: no-op filters absent
+                    req(v %in% varsNow())
                     spec <- cache$bin[[v]]
+                    own_f <- fl[[v]]     # NULL when v's filter is inactive
                     loo_f <- fl[setdiff(names(fl), v)]
-                    ## one combined query for both count vectors, and the
-                    ## global row count is a reactive shared by all plots
-                    pair <- backend$get_binned_pair(v, spec, loo_f, fl[[v]])
+                    ## one combined query for both count vectors; the
+                    ## global row count is a reactive shared by all plots.
+                    ## When v has no active filter, its leave-one-out set
+                    ## IS the full filter set, so n_shown = n_sel and the
+                    ## per-plot count query is skipped -- with normalized
+                    ## filters an interaction costs k pair queries + one
+                    ## loo count per ACTIVELY filtered column + 1 global,
+                    ## instead of 2k + 1
+                    pair <- backend$get_binned_pair(v, spec, loo_f, own_f)
                     draw(spec, shown = pair$shown, sel = pair$sel,
-                         n_shown = backend$get_count(loo_f),
+                         n_shown = if (is.null(own_f)) nSelected()
+                                   else backend$get_count(loo_f),
                          n_sel   = nSelected(),
                          plot_label())
                 })
@@ -361,7 +369,13 @@ thanosServer <- function(id, backend,
         })
 
         ## current filter settings of every active variable, in the shape
-        ## the DBI backends' filter_clauses() expects (aggregate mode)
+        ## the DBI backends' filter_clauses() expects (aggregate mode),
+        ## NORMALIZED: entries that impose no restriction are dropped.
+        ## An untouched widget still reports a value (full-range slider,
+        ## every box ticked) which adds no SQL clause -- but if it stayed
+        ## in this list it would change every plot's cache key, so merely
+        ## ADDING a column used to cold-recompute all existing plots
+        ## (the demo_big replot-on-add / queue pile-up bug).
         filtersNow <- reactive({
             vs <- varsNow()
             fs <- filterState$filters
@@ -372,7 +386,7 @@ thanosServer <- function(id, backend,
                      include_na = na[[v]] %||% TRUE)
             })
             names(out) <- vs
-            out
+            normalize_filters(out, cache$info)
         })
 
         globalMask <- reactive({
@@ -412,6 +426,26 @@ thanosServer <- function(id, backend,
             }
         )
     })
+}
+
+## Drop filter entries that impose no restriction: NULL values, fully
+## unbounded slider ranges, or a categorical/discrete selection covering
+## every level -- all with include-NA on.  They contribute no SQL clause,
+## and keeping them would only perturb query cache keys.
+## An entry with include_na = FALSE always restricts (it drops NA rows)
+## and is always kept.
+normalize_filters <- function(fl, infos) {
+    keep <- vapply(names(fl), function(v) {
+        f <- fl[[v]]
+        if (!isTRUE(f$include_na)) return(TRUE)
+        if (is.null(f$val)) return(FALSE)
+        if (f$is_numeric && !is.character(f$val)) {
+            return(any(is.finite(f$val)))
+        }
+        levs <- infos[[v]]$levels
+        !(!is.null(levs) && setequal(f$val, levs))
+    }, NA)
+    fl[keep]
 }
 
 ## Slider geometry for a numeric variable, over the outlier-robust
