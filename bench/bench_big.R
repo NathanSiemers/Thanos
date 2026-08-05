@@ -9,13 +9,8 @@ root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_backend.R")),
                c(".", ".."))[1]
 invisible(lapply(list.files(file.path(root, "R"), pattern = "^thanos_.*[.]R$",
                             full.names = TRUE), source))
+source(file.path(root, "bench", "bench_common.R"))
 
-timeit <- function(label, expr, reps = 3) {
-    expr <- substitute(expr)
-    eval(expr, parent.frame())  # warm-up
-    t <- system.time(for (i in seq_len(reps)) eval(expr, parent.frame()))
-    cat(sprintf("%-52s %9.0f ms\n", label, 1000 * t[["elapsed"]] / reps))
-}
 
 ## a realistic interaction state: two active filters
 FILTERS <- list(

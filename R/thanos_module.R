@@ -19,17 +19,19 @@
 ##                       the filter selection (adds panels for any not
 ##                       already selected; never removes; unknown column
 ##                       names are ignored).  The one sanctioned way for
-##                       a parent app to drive the filter set -- e.g. a
-##                       grapher adding its plotted axes so their NAs and
-##                       ranges become user-controllable.
+##                       a parent app to drive the filter set.
 ##
-## Reactive architecture (why it is fast):
-##   - each variable owns ONE debounced mask reactive; moving a slider
-##     recomputes only that variable's O(n) mask
+## Reactive architecture (see design.md for the full graph):
+##   - each variable owns ONE debounced observer; changing its filter
+##     recomputes only that variable's O(n) mask (vector mode) and its
+##     canonical filter entry
 ##   - leave-one-out masks for all k variables come from one reactive
 ##     using prefix/suffix cumulative ANDs: O(3k) vector ANDs, not O(k^2)
-##   - each plot is registered once and reads pre-binned indices, so a
-##     render is O(bins), not O(rows)
+##   - each plot is registered once; where its counts come from is the
+##     ONLY thing the two execution modes disagree about, so that choice
+##     is a single closure (counts_for) picked at server start
+##   - per-variable lifecycle state is one object (cache$var[[v]]),
+##     created whole by add_var() and deleted whole by remove_var()
 ################################################################
 library(shiny)
 
@@ -90,17 +92,13 @@ thanosServer <- function(id, backend,
             stop("this backend does not support aggregate mode")
         }
 
-        ## non-reactive per-session caches, keyed by column name
+        ## one non-reactive state object per selected variable:
+        ## info, widget kind, bin spec, cached column (vector mode),
+        ## slider bounds, observers, seen/can_log flags
         cache <- new.env(parent = emptyenv())
-        cache$col    <- list()  # full column vectors (vector mode only)
-        cache$bin    <- list()  # bin_column() / bin_spec_from_info() results
-        cache$info   <- list()  # get_column_info() results
-        cache$obs    <- list()  # observers to destroy when a var is removed
-        cache$seen   <- list()  # TRUE once a checkbox filter has sent a value
-        cache$widget <- list()  # "slider" | "checkbox" | "selectize"
-        cache$slider <- list()  # slider bounds (lo/hi/step) per numeric var
+        cache$var <- list()
 
-        maskStore   <- reactiveValues()  # var -> logical(n_rows)
+        maskStore   <- reactiveValues()  # var -> logical(n_rows), vector mode
         filterState <- reactiveValues(filters = list(), includeNA = list(),
                                       log = list())
         varsNow     <- reactiveVal(character(0))
@@ -125,55 +123,95 @@ thanosServer <- function(id, backend,
         ## column name -> id-safe fragment for input/output ids and selectors
         vid <- function(v) gsub("[^A-Za-z0-9_]", "_", v)
 
+        plot_label <- function(v) {
+            if (isTRUE(filterState$log[[v]])) paste0(v, " (log2+1)") else v
+        }
+
+        ## where a plot's counts come from is the ONLY per-mode decision
+        ## in the render path; everything downstream of this closure is
+        ## shared (see bin_counts / plot_histo_counts in thanos_plot.R)
+        counts_for <- if (mode == "vector") {
+            function(v) {
+                loo <- looMasks()[[v]]
+                req(!is.null(loo))
+                own <- maskStore[[v]] %||% rep(TRUE, n_rows)
+                bin_counts(cache$var[[v]]$bin, loo, own)
+            }
+        } else {
+            function(v) {
+                fl <- filtersNow()   # normalized: no-op filters absent
+                req(v %in% varsNow())
+                own_f <- fl[[v]]     # NULL when v's filter is inactive
+                loo_f <- fl[setdiff(names(fl), v)]
+                ## one combined query for both count vectors; the global
+                ## row count is a reactive shared by all plots.  When v
+                ## has no active filter its leave-one-out set IS the full
+                ## filter set, so n_shown = n_sel and the per-plot count
+                ## query is skipped -- an interaction costs k pair
+                ## queries + one loo count per ACTIVELY filtered column
+                ## + 1 global, instead of 2k + 1
+                pair <- backend$get_binned_pair(v, cache$var[[v]]$bin,
+                                                loo_f, own_f)
+                list(shown = pair$shown, sel = pair$sel,
+                     n_shown = if (is.null(own_f)) nSelected()
+                               else backend$get_count(loo_f),
+                     n_sel = nSelected())
+            }
+        }
+
+        build_bin <- function(st, use_log) {
+            if (mode == "vector") {
+                bin_column(st$col, bins,
+                    discrete_values = if (st$discrete) st$info$values,
+                    range = if (st$info$is_numeric && !st$discrete)
+                                display_range(st$info),
+                    log2p1 = use_log)
+            } else {
+                bin_spec_from_info(st$info, bins, discrete = st$discrete,
+                                   log2p1 = use_log)
+            }
+        }
+
         add_var <- function(v) {
-            info <- backend$get_column_info(v)
             id <- vid(v)
+            info <- backend$get_column_info(v)
             ## a numeric column with few distinct values ('month') gets
             ## checkboxes with membership semantics instead of a slider
             discrete <- isTRUE(info$is_numeric) && !is.null(info$values) &&
                 (info$n_unique %||% Inf) <= max_discrete_numeric
             if (discrete) info$levels <- as.character(info$values)
-            cache$info[[v]] <- info
-            stored_log0 <- isTRUE(isolate(filterState$log[[v]]))
-            if (mode == "vector") {
-                x <- backend$get_column(v)
-                cache$col[[v]] <- x
-                cache$bin[[v]] <- bin_column(x, bins,
-                    discrete_values = if (discrete) info$values,
-                    range = if (info$is_numeric && !discrete) display_range(info),
-                    log2p1 = stored_log0)
-            } else {
-                cache$bin[[v]] <- bin_spec_from_info(info, bins,
-                                                     discrete = discrete,
-                                                     log2p1 = stored_log0)
-            }
             widget <- if (info$is_numeric && !discrete) "slider"
                       else if (length(info$levels) <= max_checkbox_levels) "checkbox"
                       else "selectize"
-            cache$widget[[v]] <- widget
-            stored     <- isolate(filterState$filters[[v]])
-            stored_na  <- isolate(filterState$includeNA[[v]]) %||% TRUE
-            stored_log <- isTRUE(isolate(filterState$log[[v]]))
             ## log2(x+1) toggle: non-negative sliders only, and in
             ## aggregate mode only if the SQL engine has log2()
             can_log <- widget == "slider" && isTRUE(info$range[1] >= 0) &&
                 (mode == "vector" || isTRUE(backend$supports_log2))
-            if (!can_log) stored_log <- FALSE
-            if (widget == "slider") {
-                cache$slider[[v]] <- slider_bounds(info, log2p1 = stored_log)
-            }
+
+            stored     <- isolate(filterState$filters[[v]])
+            stored_na  <- isolate(filterState$includeNA[[v]]) %||% TRUE
+            stored_log <- can_log && isTRUE(isolate(filterState$log[[v]]))
+
+            st <- list(info = info, widget = widget, discrete = discrete,
+                       can_log = can_log, seen = FALSE,
+                       col = if (mode == "vector") backend$get_column(v),
+                       slider = if (widget == "slider")
+                                    slider_bounds(info, log2p1 = stored_log))
+            st$bin <- build_bin(st, stored_log)
+            cache$var[[v]] <- st
+
             insertUI(paste0("#", ns("panels")), where = "beforeEnd",
                      immediate = TRUE,
                      ui = make_var_panel(ns, v, id, info, widget,
                                          stored, stored_na, plot_height,
-                                         slider = cache$slider[[v]],
+                                         slider = st$slider,
                                          can_log = can_log,
                                          stored_log = stored_log))
 
-            ## one mask observer per variable: any change to its filter or
-            ## include-NA input recomputes only THIS variable's mask
-            ## debounce sliders AND checkboxes: a lazy drag or a rapid
-            ## run of clicks coalesces into one recomputation
+            ## one observer per variable: any change to its filter or
+            ## include-NA input recomputes only THIS variable's mask.
+            ## Sliders AND checkboxes are debounced: a lazy drag or a
+            ## rapid run of clicks coalesces into one recomputation.
             raw_filter <- reactive(input[[paste0("filter_", id)]])
             db_ms <- if (widget == "slider") debounce_ms else debounce_checkbox_ms
             filt <- if (db_ms > 0) debounce(raw_filter, db_ms) else raw_filter
@@ -181,17 +219,18 @@ thanosServer <- function(id, backend,
             obs_mask <- observe({
                 val <- filt()
                 keep_na <- if (has_na) (input[[paste0("na_", id)]] %||% TRUE) else TRUE
-                if (!is.null(val)) cache$seen[[v]] <- TRUE
+                if (!is.null(val)) cache$var[[v]]$seen <- TRUE
                 ## a checkboxGroup with everything unchecked reports NULL;
                 ## once the widget has spoken, NULL means "none", not "no filter"
-                if (is.null(val) && widget == "checkbox" && isTRUE(cache$seen[[v]])) {
+                if (is.null(val) && widget == "checkbox" &&
+                    isTRUE(cache$var[[v]]$seen)) {
                     val <- character(0)
                 }
                 ## a slider handle AT an endpoint means "unbounded on that
                 ## side": the visible range is outlier-robust (quantile
                 ## bounds), so endpoints must not silently drop the tails
                 if (!is.null(val) && widget == "slider") {
-                    sb <- cache$slider[[v]]
+                    sb <- cache$var[[v]]$slider
                     if (val[1] <= sb$lo + sb$step / 2) val[1] <- -Inf
                     if (val[2] >= sb$hi - sb$step / 2) val[2] <- Inf
                     ## with the log2 transform active the slider lives in
@@ -201,7 +240,7 @@ thanosServer <- function(id, backend,
                     }
                 }
                 if (mode == "vector") {
-                    maskStore[[v]] <- make_mask(cache$col[[v]], val, keep_na)
+                    maskStore[[v]] <- make_mask(cache$var[[v]]$col, val, keep_na)
                 }
                 filterState$filters[[v]]   <- val
                 filterState$includeNA[[v]] <- keep_na
@@ -214,15 +253,9 @@ thanosServer <- function(id, backend,
                 obs_log <- observeEvent(input[[paste0("log_", id)]], {
                     use_log <- isTRUE(input[[paste0("log_", id)]])
                     filterState$log[[v]] <- use_log
-                    if (mode == "vector") {
-                        cache$bin[[v]] <- bin_column(cache$col[[v]], bins,
-                            range = display_range(info), log2p1 = use_log)
-                    } else {
-                        cache$bin[[v]] <- bin_spec_from_info(info, bins,
-                                                             log2p1 = use_log)
-                    }
+                    cache$var[[v]]$bin <- build_bin(cache$var[[v]], use_log)
                     sb <- slider_bounds(info, log2p1 = use_log)
-                    cache$slider[[v]] <- sb
+                    cache$var[[v]]$slider <- sb
                     updateSliderInput(session, paste0("filter_", id),
                                       min = sb$lo, max = sb$hi,
                                       value = c(sb$lo, sb$hi), step = sb$step)
@@ -247,77 +280,22 @@ thanosServer <- function(id, backend,
                 }, ignoreInit = TRUE)
                 obs_list <- c(obs_list, list(obs_an))
             }
-            cache$obs[[v]] <- obs_list
+            cache$var[[v]]$obs <- obs_list
 
-            ## registered ONCE; O(bins) per render thanks to bin_column(),
-            ## or four SQL aggregate queries in aggregate mode
-            plot_label <- function() {
-                if (isTRUE(filterState$log[[v]])) paste0(v, " (log2+1)") else v
-            }
-            ## both engines draw the same visual; "base" skips the
-            ## ggplot/grid pipeline (a ggplot object must be returned for
-            ## renderPlot to print, base draws directly and returns NULL)
-            draw <- function(spec, shown, sel, n_shown, n_sel, label) {
-                if (plot_engine == "base") {
-                    plot_histo_counts_base(spec, shown, sel, n_shown, n_sel,
-                                           label)
-                } else {
-                    plot_histo_counts(spec, shown, sel, n_shown, n_sel, label)
-                }
-            }
-            output[[paste0("plot_", id)]] <- if (mode == "vector") {
-                renderPlot({
-                    loo <- looMasks()[[v]]
-                    req(!is.null(loo))
-                    own <- maskStore[[v]] %||% rep(TRUE, n_rows)
-                    bin <- cache$bin[[v]]
-                    if (bin$nbins == 0) {
-                        draw(bin, integer(0), integer(0),
-                             sum(loo), sum(own & loo), plot_label())
-                    } else {
-                        draw(bin,
-                             shown = tabulate(bin$idx[loo], nbins = bin$nbins),
-                             sel   = tabulate(bin$idx[own & loo],
-                                              nbins = bin$nbins),
-                             n_shown = sum(loo), n_sel = sum(own & loo),
-                             plot_label())
-                    }
-                })
-            } else {
-                renderPlot({
-                    fl <- filtersNow()   # normalized: no-op filters absent
-                    req(v %in% varsNow())
-                    spec <- cache$bin[[v]]
-                    own_f <- fl[[v]]     # NULL when v's filter is inactive
-                    loo_f <- fl[setdiff(names(fl), v)]
-                    ## one combined query for both count vectors; the
-                    ## global row count is a reactive shared by all plots.
-                    ## When v has no active filter, its leave-one-out set
-                    ## IS the full filter set, so n_shown = n_sel and the
-                    ## per-plot count query is skipped -- with normalized
-                    ## filters an interaction costs k pair queries + one
-                    ## loo count per ACTIVELY filtered column + 1 global,
-                    ## instead of 2k + 1
-                    pair <- backend$get_binned_pair(v, spec, loo_f, own_f)
-                    draw(spec, shown = pair$shown, sel = pair$sel,
-                         n_shown = if (is.null(own_f)) nSelected()
-                                   else backend$get_count(loo_f),
-                         n_sel   = nSelected(),
-                         plot_label())
-                })
-            }
+            ## registered ONCE per variable; O(bins) per render in vector
+            ## mode, a couple of memoised SQL queries in aggregate mode
+            output[[paste0("plot_", id)]] <- renderPlot({
+                ct <- counts_for(v)
+                plot_histo_counts(cache$var[[v]]$bin, ct$shown, ct$sel,
+                                  ct$n_shown, ct$n_sel, plot_label(v),
+                                  engine = plot_engine)
+            })
         }
 
         remove_var <- function(v) {
             removeUI(paste0("#", ns(paste0("panel_", vid(v)))), immediate = TRUE)
-            for (o in cache$obs[[v]]) o$destroy()
-            cache$obs[[v]]    <- NULL
-            cache$col[[v]]    <- NULL
-            cache$bin[[v]]    <- NULL
-            cache$info[[v]]   <- NULL
-            cache$seen[[v]]   <- NULL
-            cache$widget[[v]] <- NULL
-            cache$slider[[v]] <- NULL
+            for (o in cache$var[[v]]$obs) o$destroy()
+            cache$var[[v]] <- NULL
             maskStore[[v]] <- NULL
             ## deselecting a column removes its filtering COMPLETELY --
             ## no ghost filters (Project.md note).  With remember_removed
@@ -369,24 +347,21 @@ thanosServer <- function(id, backend,
         })
 
         ## current filter settings of every active variable, in the shape
-        ## the DBI backends' filter_clauses() expects (aggregate mode),
-        ## NORMALIZED: entries that impose no restriction are dropped.
-        ## An untouched widget still reports a value (full-range slider,
-        ## every box ticked) which adds no SQL clause -- but if it stayed
-        ## in this list it would change every plot's cache key, so merely
-        ## ADDING a column used to cold-recompute all existing plots
-        ## (the demo_big replot-on-add / queue pile-up bug).
+        ## the DBI backends' filter_clauses() expects, NORMALIZED:
+        ## entries that impose no restriction are dropped so that no-op
+        ## widget states can neither add SQL clauses nor perturb query
+        ## cache keys (the demo_big replot-on-add / queue pile-up bug)
         filtersNow <- reactive({
             vs <- varsNow()
             fs <- filterState$filters
             na <- filterState$includeNA
             out <- lapply(vs, function(v) {
-                list(is_numeric = isTRUE(cache$info[[v]]$is_numeric),
+                list(is_numeric = isTRUE(cache$var[[v]]$info$is_numeric),
                      val = fs[[v]],
                      include_na = na[[v]] %||% TRUE)
             })
             names(out) <- vs
-            normalize_filters(out, cache$info)
+            normalize_filters(out, lapply(cache$var, `[[`, "info"))
         })
 
         globalMask <- reactive({

@@ -118,73 +118,70 @@ backend_dbi <- function(con,
         else sprintf("CAST(%s AS INTEGER) + 1", ratio)
     }
 
-    ## one SQL condition per filtered variable, per the NA semantics above
+    ## THE single translator from a filter entry to SQL conditions on the
+    ## value column.  Returns:
+    ##   $pass  condition a value must meet (NULL = unrestricted)
+    ##   $fail  condition marking a value as failing (NULL = none fail)
+    ##   $none  TRUE when the selection passes no present value at all
+    ##          (an empty checkbox set): only NA rows can survive
+    ## Handles the three filter shapes: numeric range with possibly
+    ## infinite bounds (slider endpoint = unbounded contributes nothing),
+    ## discrete-numeric membership, and categorical level sets.
+    value_predicate <- function(f) {
+        if (is.null(f$val)) return(list(pass = NULL, fail = NULL, none = FALSE))
+        if (f$is_numeric && is.character(f$val)) {          # discrete numeric
+            if (length(f$val) == 0) return(list(pass = NULL, fail = NULL,
+                                                none = TRUE))
+            set <- paste(vapply(as.numeric(f$val), num, character(1)),
+                         collapse = ", ")
+            list(pass = sprintf("value_num IN (%s)", set),
+                 fail = sprintf("value_num NOT IN (%s)", set), none = FALSE)
+        } else if (f$is_numeric) {                          # range
+            lo <- f$val[1]; hi <- f$val[2]
+            pass <- c(if (is.finite(lo)) sprintf("value_num >= %s", num(lo)),
+                      if (is.finite(hi)) sprintf("value_num <= %s", num(hi)))
+            fail <- c(if (is.finite(lo)) sprintf("value_num < %s", num(lo)),
+                      if (is.finite(hi)) sprintf("value_num > %s", num(hi)))
+            list(pass = if (length(pass)) paste(pass, collapse = " AND "),
+                 fail = if (length(fail)) paste(fail, collapse = " OR "),
+                 none = FALSE)
+        } else {                                            # categorical
+            if (length(f$val) == 0) return(list(pass = NULL, fail = NULL,
+                                                none = TRUE))
+            set <- paste(vapply(f$val, qs, character(1)), collapse = ", ")
+            list(pass = sprintf("value_txt IN (%s)", set),
+                 fail = sprintf("value_txt NOT IN (%s)", set), none = FALSE)
+        }
+    }
+
+    ## one row_id condition per filtered variable, wrapping the value
+    ## predicates in the NA-by-absence algebra described above
     filter_clauses <- function(filters) {
         out <- character(0)
         for (v in names(filters)) {
             f <- filters[[v]]
             keep_na <- isTRUE(f$include_na %||% TRUE)
             vq <- qs(v)
-            clause <- if (is.null(f$val)) {
-                if (keep_na) next
-                sprintf("row_id IN (SELECT row_id FROM %s WHERE column_name = %s)",
-                        table, vq)
-            } else if (f$is_numeric && is.character(f$val)) {
-                ## discrete numeric (checkbox widget): membership on value_num
-                if (length(f$val) == 0) {
-                    if (keep_na) {
-                        sprintf("row_id NOT IN (SELECT row_id FROM %s WHERE column_name = %s)",
-                                table, vq)
-                    } else "1 = 0"
+            pr <- value_predicate(f)
+            presence <- sprintf(
+                "(SELECT row_id FROM %s WHERE column_name = %s)", table, vq)
+            clause <- if (keep_na) {
+                if (pr$none) {
+                    paste("row_id NOT IN", presence)
+                } else if (is.null(pr$fail)) {
+                    next   # unrestricted: no clause at all
                 } else {
-                    set <- paste(vapply(as.numeric(f$val), num, character(1)),
-                                 collapse = ", ")
-                    if (keep_na) {
-                        sprintf(paste("row_id NOT IN (SELECT row_id FROM %s",
-                                      "WHERE column_name = %s AND value_num NOT IN (%s))"),
-                                table, vq, set)
-                    } else {
-                        sprintf(paste("row_id IN (SELECT row_id FROM %s",
-                                      "WHERE column_name = %s AND value_num IN (%s))"),
-                                table, vq, set)
-                    }
-                }
-            } else if (f$is_numeric) {
-                ## infinite bounds (slider handle at an endpoint =
-                ## "unbounded on that side") contribute no condition
-                lo <- f$val[1]; hi <- f$val[2]
-                if (keep_na) {
-                    fail <- c(if (is.finite(lo)) sprintf("value_num < %s", num(lo)),
-                              if (is.finite(hi)) sprintf("value_num > %s", num(hi)))
-                    if (length(fail) == 0) next  # fully unbounded: no filter
                     sprintf("row_id NOT IN (SELECT row_id FROM %s WHERE column_name = %s AND (%s))",
-                            table, vq, paste(fail, collapse = " OR "))
-                } else {
-                    pass <- c(if (is.finite(lo)) sprintf("value_num >= %s", num(lo)),
-                              if (is.finite(hi)) sprintf("value_num <= %s", num(hi)))
-                    if (length(pass) == 0) {
-                        sprintf("row_id IN (SELECT row_id FROM %s WHERE column_name = %s)",
-                                table, vq)
-                    } else {
-                        sprintf("row_id IN (SELECT row_id FROM %s WHERE column_name = %s AND %s)",
-                                table, vq, paste(pass, collapse = " AND "))
-                    }
+                            table, vq, pr$fail)
                 }
-            } else if (length(f$val) == 0) {
-                if (keep_na) {
-                    sprintf("row_id NOT IN (SELECT row_id FROM %s WHERE column_name = %s)",
-                            table, vq)
-                } else "1 = 0"
             } else {
-                set <- paste(vapply(f$val, qs, character(1)), collapse = ", ")
-                if (keep_na) {
-                    sprintf(paste("row_id NOT IN (SELECT row_id FROM %s",
-                                  "WHERE column_name = %s AND value_txt NOT IN (%s))"),
-                            table, vq, set)
+                if (pr$none) {
+                    "1 = 0"
+                } else if (is.null(pr$pass)) {
+                    paste("row_id IN", presence)
                 } else {
-                    sprintf(paste("row_id IN (SELECT row_id FROM %s",
-                                  "WHERE column_name = %s AND value_txt IN (%s))"),
-                            table, vq, set)
+                    sprintf("row_id IN (SELECT row_id FROM %s WHERE column_name = %s AND %s)",
+                            table, vq, pr$pass)
                 }
             }
             out <- c(out, clause)
@@ -241,6 +238,53 @@ backend_dbi <- function(con,
     ## into a deparse()d key
     spec_key <- function(spec) spec[setdiff(names(spec), "idx")]
 
+    ## shown and sel counts in ONE query: shown = rows passing the
+    ## leave-one-out filters, sel = of those, rows also passing this
+    ## variable's own filter (a CASE on the value itself -- cheap).
+    ## get_binned() is this with no own filter, so it delegates.
+    get_binned_pair <- function(name, spec, loo_filters, own) {
+      memo_get(memo_key("pair", name, spec_key(spec), loo_filters, own),
+               function() {
+        info <- infos[[name]]
+        clauses <- filter_clauses(loo_filters)
+        vq <- qs(name)
+        value_col <- if (info$is_numeric) "value_num" else "value_txt"
+        own_pred <- if (is.null(own)) NULL else {
+            own$is_numeric <- info$is_numeric   # the column decides its type
+            pr <- value_predicate(own)
+            if (pr$none) "1 = 0" else pr$pass
+        }
+        sel_expr <- if (is.null(own_pred)) "COUNT(*)" else
+            sprintf("SUM(CASE WHEN %s THEN 1 ELSE 0 END)", own_pred)
+        if (spec$kind == "num") {
+            bin_expr <- bin_value_expr(spec)
+            res <- DBI::dbGetQuery(con, sprintf(
+                "SELECT CASE WHEN %s > %d THEN %d
+                             WHEN %s < 1 THEN 1 ELSE %s END AS bin,
+                        COUNT(*) AS shown, %s AS sel
+                 FROM %s WHERE column_name = %s AND value_num IS NOT NULL%s
+                 GROUP BY bin",
+                bin_expr, spec$nbins, spec$nbins, bin_expr, bin_expr,
+                sel_expr, table, vq, where_sql(clauses)))
+            shown <- rep(0, spec$nbins); sel <- rep(0, spec$nbins)
+            shown[res$bin] <- res$shown
+            sel[res$bin]   <- res$sel
+        } else {
+            res <- DBI::dbGetQuery(con, sprintf(
+                "SELECT %s AS lev, COUNT(*) AS shown, %s AS sel
+                 FROM %s WHERE column_name = %s%s
+                 GROUP BY %s",
+                value_col, sel_expr, table, vq, where_sql(clauses),
+                value_col))
+            shown <- rep(0, spec$nbins); sel <- rep(0, spec$nbins)
+            hit <- match(as.character(res$lev), spec$labels)
+            shown[hit[!is.na(hit)]] <- res$shown[!is.na(hit)]
+            sel[hit[!is.na(hit)]]   <- res$sel[!is.na(hit)]
+        }
+        list(shown = shown, sel = sel)
+      })
+    }
+
     list(
         get_columns = function() reg$column_name,
         n_rows = function() n,
@@ -270,110 +314,12 @@ backend_dbi <- function(con,
         supports_binned = TRUE,
         supports_log2 = log2_ok,
 
-        ## histogram counts for `name` over rows passing `filters`,
-        ## binned per `spec` (a bin_spec_from_info()/bin_column() result)
-        get_binned = function(name, spec, filters) {
-          memo_get(memo_key("binned", name, spec_key(spec), filters), function() {
-            info <- infos[[name]]
-            clauses <- filter_clauses(filters)
-            vq <- qs(name)
-            if (spec$kind == "cat" && info$is_numeric) {
-                ## discrete numeric: one bar per distinct value
-                res <- DBI::dbGetQuery(con, sprintf(
-                    "SELECT value_num AS lev, COUNT(*) AS cnt
-                     FROM %s WHERE column_name = %s%s
-                     GROUP BY value_num",
-                    table, vq, where_sql(clauses)))
-                counts <- rep(0, spec$nbins)
-                hit <- match(as.character(res$lev), spec$labels)
-                counts[hit[!is.na(hit)]] <- res$cnt[!is.na(hit)]
-                counts
-            } else if (info$is_numeric) {
-                bin_expr <- bin_value_expr(spec)
-                res <- DBI::dbGetQuery(con, sprintf(
-                    "SELECT CASE WHEN %s > %d THEN %d
-                                 WHEN %s < 1 THEN 1 ELSE %s END AS bin,
-                            COUNT(*) AS cnt
-                     FROM %s WHERE column_name = %s AND value_num IS NOT NULL%s
-                     GROUP BY bin",
-                    bin_expr, spec$nbins, spec$nbins, bin_expr, bin_expr,
-                    table, vq, where_sql(clauses)))
-                counts <- rep(0, spec$nbins)
-                counts[res$bin] <- res$cnt
-            } else {
-                res <- DBI::dbGetQuery(con, sprintf(
-                    "SELECT value_txt AS lev, COUNT(*) AS cnt
-                     FROM %s WHERE column_name = %s%s
-                     GROUP BY value_txt",
-                    table, vq, where_sql(clauses)))
-                counts <- rep(0, spec$nbins)
-                hit <- match(res$lev, spec$labels)
-                counts[hit[!is.na(hit)]] <- res$cnt[!is.na(hit)]
-            }
-            counts
-          })
-        },
+        get_binned_pair = get_binned_pair,
 
-        ## shown and sel counts in ONE query: shown = rows passing the
-        ## leave-one-out filters, sel = of those, rows also passing this
-        ## variable's own filter (a CASE on the value itself -- cheap).
-        ## Halves the per-plot query load vs two get_binned() calls.
-        get_binned_pair = function(name, spec, loo_filters, own) {
-          memo_get(memo_key("pair", name, spec_key(spec), loo_filters, own),
-                   function() {
-            info <- infos[[name]]
-            clauses <- filter_clauses(loo_filters)
-            vq <- qs(name)
-            value_col <- if (info$is_numeric) "value_num" else "value_txt"
-            own_pred <- if (is.null(own) || is.null(own$val)) {
-                NULL                                   # no own filter: sel = shown
-            } else if (info$is_numeric && is.character(own$val)) {
-                if (length(own$val) == 0) "1 = 0"
-                else sprintf("value_num IN (%s)",
-                             paste(vapply(as.numeric(own$val), num,
-                                          character(1)), collapse = ", "))
-            } else if (info$is_numeric) {
-                pass <- c(if (is.finite(own$val[1]))
-                              sprintf("value_num >= %s", num(own$val[1])),
-                          if (is.finite(own$val[2]))
-                              sprintf("value_num <= %s", num(own$val[2])))
-                if (length(pass) == 0) NULL
-                else paste(pass, collapse = " AND ")
-            } else {
-                if (length(own$val) == 0) "1 = 0"
-                else sprintf("value_txt IN (%s)",
-                             paste(vapply(own$val, qs, character(1)),
-                                   collapse = ", "))
-            }
-            sel_expr <- if (is.null(own_pred)) "COUNT(*)" else
-                sprintf("SUM(CASE WHEN %s THEN 1 ELSE 0 END)", own_pred)
-            if (spec$kind == "num") {
-                bin_expr <- bin_value_expr(spec)
-                res <- DBI::dbGetQuery(con, sprintf(
-                    "SELECT CASE WHEN %s > %d THEN %d
-                                 WHEN %s < 1 THEN 1 ELSE %s END AS bin,
-                            COUNT(*) AS shown, %s AS sel
-                     FROM %s WHERE column_name = %s AND value_num IS NOT NULL%s
-                     GROUP BY bin",
-                    bin_expr, spec$nbins, spec$nbins, bin_expr, bin_expr,
-                    sel_expr, table, vq, where_sql(clauses)))
-                shown <- rep(0, spec$nbins); sel <- rep(0, spec$nbins)
-                shown[res$bin] <- res$shown
-                sel[res$bin]   <- res$sel
-            } else {
-                res <- DBI::dbGetQuery(con, sprintf(
-                    "SELECT %s AS lev, COUNT(*) AS shown, %s AS sel
-                     FROM %s WHERE column_name = %s%s
-                     GROUP BY %s",
-                    value_col, sel_expr, table, vq, where_sql(clauses),
-                    value_col))
-                shown <- rep(0, spec$nbins); sel <- rep(0, spec$nbins)
-                hit <- match(as.character(res$lev), spec$labels)
-                shown[hit[!is.na(hit)]] <- res$shown[!is.na(hit)]
-                sel[hit[!is.na(hit)]]   <- res$sel[!is.na(hit)]
-            }
-            list(shown = shown, sel = sel)
-          })
+        ## histogram counts over rows passing `filters`: the pair query
+        ## with no own filter, so shown IS the answer
+        get_binned = function(name, spec, filters) {
+            get_binned_pair(name, spec, filters, NULL)$shown
         },
 
         get_count = function(filters) {

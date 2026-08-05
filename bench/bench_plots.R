@@ -20,6 +20,7 @@ root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_plot.R")),
                c(".", ".."))[1]
 invisible(lapply(list.files(file.path(root, "R"), pattern = "^thanos_.*[.]R$",
                             full.names = TRUE), source))
+source(file.path(root, "bench", "bench_common.R"))
 
 fl <- as.data.frame(nycflights13::flights)
 n <- nrow(fl)
@@ -43,22 +44,6 @@ names(bins) <- VARS
 masks <- lapply(setNames(VARS, VARS), function(v) rep(TRUE, n))
 masks$distance <- make_mask(cols$distance, c(200, 1500))
 
-loo_combine <- function(ms) {   # same algebra as the module
-    k <- length(ms)
-    prefix <- vector("list", k); suffix <- vector("list", k)
-    acc <- ms[[1]]; prefix[[1]] <- acc
-    for (i in seq_len(k)[-1]) { acc <- acc & ms[[i]]; prefix[[i]] <- acc }
-    acc <- ms[[k]]; suffix[[k]] <- acc
-    for (i in rev(seq_len(k)[-k])) { acc <- acc & ms[[i]]; suffix[[i]] <- acc }
-    out <- lapply(seq_len(k), function(i) {
-        left  <- if (i > 1) prefix[[i - 1]] else NULL
-        right <- if (i < k) suffix[[i + 1]] else NULL
-        if (is.null(left)) right else if (is.null(right)) left
-        else left & right
-    })
-    names(out) <- names(ms)
-    out
-}
 
 ## one full interaction: dep_delay slider moved -> its mask recomputes,
 ## loo masks recombine, all k plots re-render to `device`

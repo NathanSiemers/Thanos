@@ -18,23 +18,16 @@ suppressPackageStartupMessages({
     library(RSQLite)
     library(nycflights13)
 })
+## coercion + column statistics shared with backend_memory, so the two
+## data paths agree by construction
+.thanos_root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_columns.R")),
+                       c(".", "..", "../.."))[1]
+source(file.path(.thanos_root, "R", "thanos_columns.R"))
 
 build_tall_skinny <- function(df, db_path,
                               table = "long_data",
                               registry = "column_registry") {
-    ## same column coercions as backend_memory, so the two backends
-    ## serve identical data
-    supported <- vapply(df, function(x) {
-        is.numeric(x) || is.character(x) || is.factor(x) || is.logical(x) ||
-            inherits(x, c("POSIXct", "Date"))
-    }, NA)
-    df <- as.data.frame(df)[supported]
-    df[] <- lapply(df, function(x) {
-        if (inherits(x, c("POSIXct", "Date"))) as.numeric(x)
-        else if (is.factor(x) || is.logical(x)) as.character(x)
-        else if (is.integer(x)) as.numeric(x)  # match SQLite REAL storage
-        else x
-    })
+    df <- thanos_coerce_columns(df)
     n <- nrow(df)
 
     dir.create(dirname(db_path), recursive = TRUE, showWarnings = FALSE)
@@ -69,39 +62,34 @@ build_tall_skinny <- function(df, db_path,
     for (col in names(df)) {
         x <- df[[col]]
         ok <- !is.na(x)
-        if (is.numeric(x)) {
+        s <- thanos_column_stats(x)
+        if (s$is_numeric) {
             chunk <- data.frame(row_id = which(ok),
                                 column_name = rep(col, sum(ok)),
                                 value_num = x[ok],
                                 value_txt = rep(NA_character_, sum(ok)))
-            vals <- sort(unique(x[ok]))
-            q <- if (any(ok)) unname(quantile(x, c(0.001, 0.999), na.rm = TRUE))
-                 else c(NA_real_, NA_real_)
             reg <- data.frame(
                 column_name = col, type = "numeric", n_rows = n,
-                n_na = sum(!ok),
-                min_val = suppressWarnings(min(x, na.rm = TRUE)),
-                max_val = suppressWarnings(max(x, na.rm = TRUE)),
-                is_integerish = as.integer(is.integer(x) ||
-                    isTRUE(all(x == round(x), na.rm = TRUE))),
-                n_unique = length(vals),
-                q_low = q[1], q_high = q[2],
+                n_na = s$n_na,
+                min_val = s$range[1], max_val = s$range[2],
+                is_integerish = as.integer(s$is_integerish),
+                n_unique = s$n_unique,
+                q_low = s$q_low, q_high = s$q_high,
                 ## values kept when few enough to drive checkboxes
-                levels_json = if (length(vals) <= 100 && length(vals) > 0) {
-                    as.character(jsonlite::toJSON(vals))
+                levels_json = if (!is.null(s$values) && length(s$values) > 0) {
+                    as.character(jsonlite::toJSON(s$values))
                 } else NA_character_)
         } else {
             chunk <- data.frame(row_id = which(ok),
                                 column_name = rep(col, sum(ok)),
                                 value_num = rep(NA_real_, sum(ok)),
                                 value_txt = x[ok])
-            levs <- sort(unique(x[ok]))
             reg <- data.frame(
                 column_name = col, type = "character", n_rows = n,
-                n_na = sum(!ok), min_val = NA_real_, max_val = NA_real_,
-                is_integerish = NA_integer_, n_unique = length(levs),
+                n_na = s$n_na, min_val = NA_real_, max_val = NA_real_,
+                is_integerish = NA_integer_, n_unique = length(s$levels),
                 q_low = NA_real_, q_high = NA_real_,
-                levels_json = as.character(jsonlite::toJSON(levs)))
+                levels_json = as.character(jsonlite::toJSON(s$levels)))
         }
         dbWriteTable(con, table, chunk, append = TRUE)
         dbWriteTable(con, registry, reg, append = TRUE)

@@ -76,16 +76,37 @@ bin_column <- function(x, bins = 50, discrete_values = NULL, range = NULL,
     }
 }
 
-## Core renderer working from pre-computed bin counts, so it serves both
-## the in-R path (tabulate over cached indices) and the aggregate path
-## (counts straight from a SQL GROUP BY).
+## Histogram counts for one variable from cached bin indices (vector
+## mode): rows passing all OTHER filters ("loo"), the subset also
+## passing this variable's own filter, and the row totals for the
+## title.  The single tabulation point -- the module and plot_histo()
+## both use it.
+bin_counts <- function(bin, loo, own) {
+    if (bin$nbins == 0) {
+        return(list(shown = integer(0), sel = integer(0),
+                    n_shown = sum(loo), n_sel = sum(own & loo)))
+    }
+    list(shown = tabulate(bin$idx[loo], nbins = bin$nbins),
+         sel   = tabulate(bin$idx[own & loo], nbins = bin$nbins),
+         n_shown = sum(loo), n_sel = sum(own & loo))
+}
+
+## Render a histogram from pre-computed bin counts -- the one entry
+## point both execution modes and both engines share.
 ##   spec    a bin spec: kind/nbins plus mids+width (num) or labels (cat);
-##           bin_column() results qualify
+##           bin_column() and bin_spec_from_info() results qualify
 ##   shown   per-bin counts of rows passing all OTHER filters
 ##   sel     per-bin counts of rows passing ALL filters
 ##   n_shown/n_sel  row totals for the title (may exceed sum(counts)
 ##           because NA-in-this-var rows are counted but not binned)
-plot_histo_counts <- function(spec, shown, sel, n_shown, n_sel, var) {
+##   engine  "ggplot" returns a ggplot object; "base" draws directly to
+##           the current device (an order of magnitude faster, see
+##           bench/bench_plots.R) and returns NULL
+plot_histo_counts <- function(spec, shown, sel, n_shown, n_sel, var,
+                              engine = c("ggplot", "base")) {
+    if (match.arg(engine) == "base") {
+        return(plot_histo_counts_base(spec, shown, sel, n_shown, n_sel, var))
+    }
     title <- paste(var, ":", format(n_sel, big.mark = ","),
                    "/", format(n_shown, big.mark = ","))
     if (spec$nbins == 0) {
@@ -167,15 +188,10 @@ plot_histo_counts_base <- function(spec, shown, sel, n_shown, n_sel, var) {
 ##   bin  result of bin_column() for this variable
 ##   loo  logical mask: rows surviving every other variable's filter
 ##   own  logical mask: rows surviving this variable's own filter
-plot_histo <- function(bin, loo, own, var) {
-    if (bin$nbins == 0) {
-        return(plot_histo_counts(bin, integer(0), integer(0),
-                                 sum(loo), sum(own & loo), var))
-    }
-    plot_histo_counts(bin,
-                      shown = tabulate(bin$idx[loo], nbins = bin$nbins),
-                      sel   = tabulate(bin$idx[own & loo], nbins = bin$nbins),
-                      n_shown = sum(loo), n_sel = sum(own & loo), var)
+plot_histo <- function(bin, loo, own, var, engine = c("ggplot", "base")) {
+    ct <- bin_counts(bin, loo, own)
+    plot_histo_counts(bin, ct$shown, ct$sel, ct$n_shown, ct$n_sel, var,
+                      engine = engine)
 }
 
 ## Outlier-robust display range for a numeric column: the quantile

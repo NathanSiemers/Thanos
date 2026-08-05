@@ -27,17 +27,12 @@ root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_backend.R")),
                c(".", ".."))[1]
 invisible(lapply(list.files(file.path(root, "R"), pattern = "^thanos_.*[.]R$",
                             full.names = TRUE), source))
+source(file.path(root, "bench", "bench_common.R"))
 
 db_path <- file.path(root, "db", "data", "taxi.duckdb")
 tlc_glob <- file.path(root, "db", "data", "tlc", "yellow_tripdata_*.parquet")
 if (!file.exists(db_path)) stop("run:  Rscript db/build_big_duckdb.R")
 
-timeit <- function(label, expr, reps = 3) {
-    expr <- substitute(expr)
-    eval(expr, parent.frame())  # warm-up
-    t <- system.time(for (i in seq_len(reps)) eval(expr, parent.frame()))
-    cat(sprintf("  %-46s %9.0f ms\n", label, 1000 * t[["elapsed"]] / reps))
-}
 
 con <- dbConnect(duckdb::duckdb(), db_path, read_only = TRUE)
 melt <- backend_dbi(con)   # the production melt-backed backend

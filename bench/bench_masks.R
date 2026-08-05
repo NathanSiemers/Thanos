@@ -10,15 +10,9 @@ suppressPackageStartupMessages({
 root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_plot.R")),
                c(".", ".."))[1]
 source(file.path(root, "R", "thanos_theme.R"))
+source(file.path(root, "bench", "bench_common.R"))
 source(file.path(root, "R", "thanos_plot.R"))
 
-timeit <- function(label, expr, reps = 20) {
-    expr <- substitute(expr)
-    ## warm up once, then time
-    eval(expr, parent.frame())
-    t <- system.time(for (i in seq_len(reps)) eval(expr, parent.frame()))
-    cat(sprintf("%-55s %8.2f ms\n", label, 1000 * t[["elapsed"]] / reps))
-}
 
 fl <- as.data.frame(nycflights13::flights)
 n <- nrow(fl)
@@ -27,7 +21,7 @@ cat(sprintf("flights: %s rows\n\n", format(n, big.mark = ",")))
 dep_delay <- fl$dep_delay
 carrier   <- fl$carrier
 
-timeit("make_mask numeric (dep_delay in [-10, 60])",
+timeit(reps = 20, "make_mask numeric (dep_delay in [-10, 60])",
        make_mask(dep_delay, c(-10, 60)))
 timeit("make_mask categorical (3 carriers)",
        make_mask(carrier, c("UA", "AA", "DL")))
@@ -36,19 +30,6 @@ timeit("make_mask categorical (3 carriers)",
 set.seed(1)
 masks_for <- function(k) replicate(k, sample(c(TRUE, TRUE, TRUE, FALSE), n,
                                              replace = TRUE), simplify = FALSE)
-loo_combine <- function(ms) {
-    k <- length(ms)
-    prefix <- vector("list", k); suffix <- vector("list", k)
-    acc <- ms[[1]]; prefix[[1]] <- acc
-    for (i in seq_len(k)[-1]) { acc <- acc & ms[[i]]; prefix[[i]] <- acc }
-    acc <- ms[[k]]; suffix[[k]] <- acc
-    for (i in rev(seq_len(k)[-k])) { acc <- acc & ms[[i]]; suffix[[i]] <- acc }
-    lapply(seq_len(k), function(i) {
-        left  <- if (i > 1) prefix[[i - 1]] else NULL
-        right <- if (i < k) suffix[[i + 1]] else NULL
-        if (is.null(left)) right else if (is.null(right)) left else left & right
-    })
-}
 for (k in c(3, 6, 10)) {
     ms <- masks_for(k)
     timeit(sprintf("leave-one-out combine, k = %2d vars", k), loo_combine(ms))

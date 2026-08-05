@@ -6,7 +6,9 @@ categoricals), and every variable's histogram updates instantly as you
 filter — each one shows the rows passing all *other* filters, with this
 variable's own selection overlaid in plasma colors (sel/unsel).
 
-See `Project.md` for the project goals and roadmap.
+See `Project.md` for the project goals and roadmap, and `design.md`
+for the architecture: the layering, the data shapes the pieces
+exchange, the reactive graph, and the reasoning behind them.
 
 ## Layout
 

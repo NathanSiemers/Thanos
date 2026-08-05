@@ -1,7 +1,7 @@
 ################################################################
 ## Thanos backend contract
 ##
-## A backend is a plain named list of four functions.  The module treats
+## A backend is a plain named list of functions.  The module treats
 ## the data as a column store: it fetches a column once when the user
 ## selects it and never again while it stays selected, so a backend can
 ## be an in-memory data frame or a database without the module changing.
@@ -11,30 +11,21 @@
 ##   $get_column(name)       -> full-length vector, NAs preserved, in
 ##                              row-ID order; numeric or character
 ##   $get_column_info(name)  -> list(name, is_numeric, n_na, and
-##                              range + is_integerish  (numeric) or
-##                              levels                 (categorical))
+##                              range + is_integerish + n_unique +
+##                              values + q_low/q_high   (numeric) or
+##                              levels                  (categorical))
 ##                              cheap column metadata for building widgets
 ##                              without shipping the whole column
+##
+## Optional capabilities (see thanos_backend_sqlite.R): supports_binned
+## + the aggregate query functions, supports_log2, caching accessors.
 ################################################################
 
-## In-memory backend wrapping a data frame.
-## Column handling: factors and logicals become character (categorical
-## widgets), Date/POSIXct become numeric (sliders over epoch values),
-## anything else non-atomic (list columns etc.) is dropped.
+## In-memory backend wrapping a data frame.  Column type handling and
+## statistics live in thanos_columns.R, shared with the database build
+## scripts so all data paths agree by construction.
 backend_memory <- function(df) {
-    df <- as.data.frame(df)
-    supported <- vapply(df, function(x) {
-        is.numeric(x) || is.character(x) || is.factor(x) || is.logical(x) ||
-            inherits(x, c("POSIXct", "Date"))
-    }, NA)
-    df <- df[supported]
-    df[] <- lapply(df, function(x) {
-        if (inherits(x, c("POSIXct", "Date"))) as.numeric(x)
-        else if (is.factor(x) || is.logical(x)) as.character(x)
-        else if (is.integer(x)) as.numeric(x)  # match SQLite REAL storage
-        else x
-    })
-
+    df <- thanos_coerce_columns(df)
     info_cache <- new.env(parent = emptyenv())
     list(
         get_columns = function() names(df),
@@ -43,26 +34,7 @@ backend_memory <- function(df) {
         get_column_info = function(name) {
             cached <- info_cache[[name]]
             if (!is.null(cached)) return(cached)
-            x <- df[[name]]
-            info <- if (is.numeric(x)) {
-                vals <- sort(unique(x[!is.na(x)]))
-                q <- if (length(vals) > 0) {
-                    unname(quantile(x, c(0.001, 0.999), na.rm = TRUE))
-                } else c(NA_real_, NA_real_)
-                list(name = name, is_numeric = TRUE, n_na = sum(is.na(x)),
-                     range = suppressWarnings(range(x, na.rm = TRUE)),
-                     is_integerish = is.integer(x) ||
-                         isTRUE(all(x == round(x), na.rm = TRUE)),
-                     n_unique = length(vals),
-                     ## the actual values, kept only when few enough to
-                     ## drive a checkbox widget (discrete numerics)
-                     values = if (length(vals) <= 100) vals,
-                     ## outlier-robust display bounds (see display_range)
-                     q_low = q[1], q_high = q[2])
-            } else {
-                list(name = name, is_numeric = FALSE, n_na = sum(is.na(x)),
-                     levels = sort(unique(x[!is.na(x)])))
-            }
+            info <- c(list(name = name), thanos_column_stats(df[[name]]))
             assign(name, info, envir = info_cache)
             info
         }

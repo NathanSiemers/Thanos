@@ -8,22 +8,14 @@ suppressPackageStartupMessages({
 })
 root <- Filter(function(p) file.exists(file.path(p, "R", "thanos_backend.R")),
                c(".", ".."))[1]
-source(file.path(root, "R", "thanos_backend.R"))
-source(file.path(root, "R", "thanos_backend_sqlite.R"))
-source(file.path(root, "R", "thanos_plot.R"))
 suppressPackageStartupMessages(library(ggplot2))
-source(file.path(root, "R", "thanos_theme.R"))
+invisible(lapply(list.files(file.path(root, "R"), pattern = "^thanos_.*[.]R$",
+                            full.names = TRUE), source))
+source(file.path(root, "bench", "bench_common.R"))
 
 db_path <- file.path(root, "db", "data", "flights.sqlite")
 if (!file.exists(db_path)) stop("run:  Rscript db/build_flights_sqlite.R")
 
-timeit <- function(label, expr, reps = 5) {
-    expr <- substitute(expr)
-    t <- system.time(for (i in seq_len(reps)) eval(expr, parent.frame()))
-    ms <- 1000 * t[["elapsed"]] / reps
-    cat(sprintf("%-58s %9.2f ms\n", label, ms))
-    invisible(ms)
-}
 
 mem <- backend_memory(as.data.frame(nycflights13::flights))
 cat("opening sqlite backend (reads registry once)...\n")
