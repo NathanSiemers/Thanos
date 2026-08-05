@@ -139,7 +139,7 @@ ui <- fluidPage(
             ),
             fluidRow(
                 column(6, checkboxInput("show_excluded",
-                    "show points excluded by the x column's filter",
+                    "compare populations split by the x column's filter",
                     value = FALSE)),
                 column(6, checkboxInput("fit_slopes",
                     "fit linear slopes", value = TRUE))
@@ -247,71 +247,112 @@ server <- function(input, output, session) {
 
     ############################################################
     ## INTERACTION, part 2b (optional): STREAMS -- the leave-one-out
-    ## partition.  th$streams(v) hands back row IDs partitioned by what
-    ## v's OWN filter did to them, while every other filter still
-    ## applies to all streams:
+    ## partition.  th$streams(v, split_range = TRUE) hands back row IDs
+    ## partitioned by what v's OWN filter did to them, while every
+    ## other filter still applies to all streams:
     ##   $selected  passed v's filter too (identical to th$rows())
-    ##   $excluded  rejected ONLY by v's filter
-    ## (split_range = TRUE further splits a range filter's rejects into
-    ##  $below / $above; drop_na = TRUE strips NA-in-v rows.)
-    ## Here: when the toggle is on, the points the x column's filter
-    ## rejected are drawn as an equally-valid second population in the
-    ## module's own sel/unsel plasma pair (magenta), under the
-    ## survivors.  Empty until x has an active filter in the Thanos
-    ## panel.
+    ##   $below     rejected under the low slider handle
+    ##   $above     rejected over the high handle
+    ##   ($excluded when the rejects cannot be split: categorical
+    ##    filters, or no range filter active)
+    ## Here: with the compare toggle on, every PAIR of populations gets
+    ## its own panel (one faded, one emphasized) and its own slope
+    ## comparison below the plot.  Two populations -> the pair in both
+    ## emphasis orders; three (both handles rejecting) -> the three
+    ## pairs.  Empty until x has an active filter in the Thanos panel.
     ############################################################
-    excluded_data <- reactive({
+    stream_sets <- reactive({
         if (!isTRUE(input$show_excluded)) return(NULL)
-        ex <- th$streams(input$x, drop_na = TRUE)$excluded
-        if (length(ex) == 0) return(NULL)
-        if (length(ex) > PLOT_CAP) ex <- sort(sample(ex, PLOT_CAP))
-        df <- data.frame(x = backend$get_column(input$x)[ex],
-                         y = backend$get_column(input$y)[ex])
-        df[complete.cases(df), , drop = FALSE]
+        s <- th$streams(input$x, split_range = TRUE, drop_na = TRUE)
+        fetch <- function(ids) {
+            if (length(ids) > PLOT_CAP) ids <- sort(sample(ids, PLOT_CAP))
+            df <- data.frame(x = backend$get_column(input$x)[ids],
+                             y = backend$get_column(input$y)[ids])
+            df[complete.cases(df), , drop = FALSE]
+        }
+        sets <- list()
+        if (length(s$below %||% integer(0)) >= 3) sets$below <- fetch(s$below)
+        sets$selected <- fetch(s$selected)
+        if (length(s$above %||% integer(0)) >= 3) sets$above <- fetch(s$above)
+        if (length(s$excluded %||% integer(0)) >= 3) {
+            sets$excluded <- fetch(s$excluded)
+        }
+        sets <- Filter(function(d) nrow(d) >= 3, sets)
+        if (length(sets) < 2) return(NULL)
+        sets
     })
 
+    ## pairwise comparison frames: each pair of populations becomes one
+    ## facet; within a facet the first-named set is faded (low alpha)
+    ## and the second emphasized.  With exactly two sets the single
+    ## pair appears in both emphasis orders.
+    comparison <- reactive({
+        sets <- stream_sets()
+        if (is.null(sets)) return(NULL)
+        nm <- names(sets)
+        prs <- if (length(nm) == 2) list(nm, rev(nm))
+               else combn(nm, 2, simplify = FALSE)
+        lab <- vapply(prs, function(pr) paste(pr[1], "vs", pr[2]), "")
+        pts <- do.call(rbind, lapply(seq_along(prs), function(i) {
+            pr <- prs[[i]]
+            rbind(cbind(sets[[pr[1]]], stream = pr[1], alpha = 0.12,
+                        pair = lab[i]),
+                  cbind(sets[[pr[2]]], stream = pr[2], alpha = 0.55,
+                        pair = lab[i]))
+        }))
+        pts$pair <- factor(pts$pair, levels = lab)
+        pts$stream <- factor(pts$stream,
+                             levels = c("below", "selected", "above",
+                                        "excluded"))
+        list(points = pts, pairs = prs, sets = sets)
+    })
+
+    ## consistent population colors everywhere (plots AND stats text):
+    ## selected keeps the plasma blue of its slope line; the reject
+    ## streams get distinct plasma hues
+    STREAM_COLS <- c(selected = "#0D0887", below = "#9C179E",
+                     above = "#E16462", excluded = "#9C179E")
+
     ## From here down: 100% ordinary grapher code.  It has no idea
-    ## Thanos exists; it just renders whatever plot_data() holds.
+    ## Thanos exists; it just renders whatever the reactives hold.
     output$scatter <- renderPlot({
         req(input$x, input$y)
+        cmp <- comparison()
+        if (!is.null(cmp)) {
+            ## pairwise comparison view: one facet per pair, faded vs
+            ## emphasized, per-population lm lines
+            p <- ggplot(cmp$points, aes(x, y, colour = stream)) +
+                geom_point(aes(alpha = alpha)) +
+                scale_alpha_identity() +
+                scale_colour_manual(values = STREAM_COLS) +
+                facet_wrap(~pair, nrow = 1, scales = "free") +
+                labs(x = input$x, y = input$y) +
+                theme_minimal(base_size = 14) +
+                theme(legend.position = "bottom")
+            if (isTRUE(input$fit_slopes)) {
+                p <- p + geom_smooth(method = "lm", formula = y ~ x,
+                                     se = FALSE, linewidth = 1)
+            }
+            return(p)
+        }
+        ## single-population view (the original grapher)
         df <- plot_data()
         aes_args <- list(x = as.name(input$x), y = as.name(input$y))
         if (input$color != "(none)") aes_args$colour <- as.name(input$color)
         if (input$size  != "(none)") aes_args$size   <- as.name(input$size)
         p <- ggplot(df, do.call(aes, aes_args))
-        ed <- excluded_data()
-        ## the two populations wear the module's plasma sel/unsel pair
-        sel_col <- "#0D0887"; exc_col <- "#9C179E"
-        if (!is.null(ed) && nrow(ed) > 0) {
-            ## excluded population first, so survivors draw on top.
-            ## Redundant encodings keep the two sets unmistakable even
-            ## when the survivors are color-mapped by a variable:
-            ## excluded = hollow magenta circles, selected = solid.
-            p <- p + geom_point(data = ed, aes(x = x, y = y),
-                                colour = exc_col, shape = 1, alpha = 0.4,
-                                inherit.aes = FALSE)
-        }
         p <- p + if (input$color == "(none)") {
-            ## no color mapping: survivors wear the plasma blue so they
-            ## pair with their slope line and contrast the magenta
-            geom_point(alpha = 0.4, colour = sel_col)
+            geom_point(alpha = 0.4, colour = STREAM_COLS[["selected"]])
         } else {
             geom_point(alpha = 0.4)
         }
-        ## slopes: ONE line per population (not per color group), so the
-        ## smooths get their own fixed aes and ignore the point layers'
         if (isTRUE(input$fit_slopes) && nrow(df) >= 3) {
+            ## ONE line for the whole population (not per color group)
             p <- p + geom_smooth(
                 data = df,
                 aes(x = .data[[input$x]], y = .data[[input$y]]),
                 method = "lm", formula = y ~ x, se = FALSE,
-                colour = sel_col, linewidth = 1, inherit.aes = FALSE)
-        }
-        if (isTRUE(input$fit_slopes) && !is.null(ed) && nrow(ed) >= 3) {
-            p <- p + geom_smooth(
-                data = ed, aes(x = x, y = y),
-                method = "lm", formula = y ~ x, se = FALSE,
-                colour = exc_col, linetype = "dashed", linewidth = 1,
+                colour = STREAM_COLS[["selected"]], linewidth = 1,
                 inherit.aes = FALSE)
         }
         if (input$color != "(none)") {
@@ -338,57 +379,71 @@ server <- function(input, output, session) {
             sprintf("; %s not drawn (NA in a plotted column)",
                     format(n_na, big.mark = ","))
         } else ""
-        ed <- excluded_data()
-        ex_note <- if (!is.null(ed) && nrow(ed) > 0) {
-            sprintf("; %s excluded by the %s filter shown as hollow magenta points",
-                    format(nrow(ed), big.mark = ","), input$x)
+        cmp <- comparison()
+        cmp_note <- if (!is.null(cmp)) {
+            sprintf("; comparing %s",
+                    paste(sprintf("%s (n = %s)", names(cmp$sets),
+                                  vapply(cmp$sets,
+                                         function(d) format(nrow(d),
+                                                            big.mark = ","),
+                                         "")),
+                          collapse = ", "))
         } else ""
         sprintf("%s of %s rows pass filters%s%s%s",
                 format(n_sel, big.mark = ","),
                 format(backend$n_rows(), big.mark = ","), capped, na_note,
-                ex_note)
+                cmp_note)
     })
 
-    ## Rudimentary slope comparison: y ~ x fit within each population,
-    ## then an interaction model y ~ x * population whose x:population
-    ## coefficient IS the slope difference (its t test answers "do the
-    ## two populations have different slopes?").  Fits use the plotted
-    ## (possibly sampled) points.
+    ## Rudimentary slope comparisons, one block per population pair:
+    ## y ~ x within each population, then an interaction model
+    ## y ~ x * population whose x:population coefficient IS the slope
+    ## difference (its t test answers "do these two populations have
+    ## different slopes?").  Fits use the plotted (possibly sampled)
+    ## points.
     output$slopes <- renderText({
         if (!isTRUE(input$fit_slopes)) return("")
         req(input$x, input$y)
-        df <- plot_data()
-        xs <- df[[input$x]]; ys <- df[[input$y]]
-        if (length(xs) < 3) return("too few selected points for a linear fit")
-        cs <- summary(lm(ys ~ xs))$coefficients
-        line_sel <- sprintf("selected:   slope = %.4g ± %.2g   (n = %s)",
-                            cs["xs", 1], cs["xs", 2],
-                            format(length(xs), big.mark = ","))
-        ed <- excluded_data()
-        if (is.null(ed) || nrow(ed) < 3) {
-            return(paste0(line_sel, "\n(turn on the excluded-points toggle,",
-                          " with an active filter on ", input$x,
-                          ", to compare slopes)"))
+        cmp <- comparison()
+        if (is.null(cmp)) {
+            df <- plot_data()
+            xs <- df[[input$x]]; ys <- df[[input$y]]
+            if (length(xs) < 3) return("too few selected points for a linear fit")
+            cs <- summary(lm(ys ~ xs))$coefficients
+            return(sprintf(paste0(
+                "selected: slope = %.4g \u00b1 %.2g   (n = %s)\n",
+                "(turn on the compare toggle, with an active filter on %s,",
+                " to compare populations)"),
+                cs["xs", 1], cs["xs", 2],
+                format(length(xs), big.mark = ","), input$x))
         }
-        ce <- summary(lm(y ~ x, data = ed))$coefficients
-        line_exc <- sprintf("excluded:   slope = %.4g ± %.2g   (n = %s)",
-                            ce["x", 1], ce["x", 2],
-                            format(nrow(ed), big.mark = ","))
-        both <- data.frame(
-            x = c(xs, ed$x), y = c(ys, ed$y),
-            grp = factor(rep(c("selected", "excluded"),
-                             c(length(xs), nrow(ed))),
-                         levels = c("excluded", "selected")))
-        ci <- summary(lm(y ~ x * grp, data = both))$coefficients
-        est <- ci["x:grpselected", ]
-        pv <- format.pval(est[[4]], digits = 3, eps = 1e-16)
-        pv <- if (grepl("^<", pv)) paste("p", pv) else paste("p =", pv)
-        verdict <- if (est[[4]] < 0.05) "the slopes differ" else
-                   "no significant slope difference"
-        line_diff <- sprintf(
-            "difference: %.4g (selected − excluded), t = %.3g, %s  →  %s",
-            est[[1]], est[[3]], pv, verdict)
-        paste(line_sel, line_exc, line_diff, sep = "\n")
+        slope_line <- function(nm, d) {
+            co <- summary(lm(y ~ x, data = d))$coefficients
+            sprintf("  %-10s slope = %.4g \u00b1 %.2g   (n = %s)",
+                    paste0(nm, ":"), co["x", 1], co["x", 2],
+                    format(nrow(d), big.mark = ","))
+        }
+        pair_block <- function(pr) {
+            a <- cmp$sets[[pr[1]]]; b <- cmp$sets[[pr[2]]]
+            both <- rbind(cbind(a, grp = pr[1]), cbind(b, grp = pr[2]))
+            both$grp <- factor(both$grp, levels = pr)
+            ci <- summary(lm(y ~ x * grp, data = both))$coefficients
+            est <- ci[paste0("x:grp", pr[2]), ]
+            pv <- format.pval(est[[4]], digits = 3, eps = 1e-16)
+            pv <- if (grepl("^<", pv)) paste("p", pv) else paste("p =", pv)
+            verdict <- if (est[[4]] < 0.05) "the slopes differ" else
+                       "no significant slope difference"
+            paste(c(sprintf("== %s vs %s ==", pr[1], pr[2]),
+                    slope_line(pr[1], a),
+                    slope_line(pr[2], b),
+                    sprintf("  difference:  %.4g (%s \u2212 %s), t = %.3g, %s  ->  %s",
+                            est[[1]], pr[2], pr[1], est[[3]], pv, verdict)),
+                  collapse = "\n")
+        }
+        ## stats once per unordered pair (the 2-set view shows both
+        ## emphasis orders of the SAME pair; one stats block suffices)
+        uprs <- unique(lapply(cmp$pairs, sort))
+        paste(vapply(uprs, pair_block, ""), collapse = "\n\n")
     })
 }
 

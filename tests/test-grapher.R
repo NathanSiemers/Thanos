@@ -71,4 +71,32 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
           setequal(session$getReturned()$add_vars("g"), c("a", "g")))
 })
 
+## the REAL grapher app server, end to end: shadow shinyApp so sourcing
+## app.R hands back its server function, then drive a scenario where
+## the x filter rejects on BOTH sides -> three populations -> three
+## pairwise comparison facets and three stats blocks
+grapher_server <- local({
+    shinyApp <- function(ui, server) server
+    source(file.path(root, "apps", "grapher", "app.R"), local = TRUE)$value
+})
+testServer(grapher_server, {
+    session$setInputs(x = "dep_delay", y = "arr_delay",
+                      color = "(none)", size = "(none)",
+                      show_excluded = TRUE, fit_slopes = TRUE)
+    session$setInputs(`thanos-vars` = "dep_delay")
+    session$setInputs(`thanos-filter_dep_delay` = c(-10, 30))
+    session$elapse(400)   # module slider debounce
+    cmp <- comparison()
+    check("both handles rejecting -> three populations, three pairs",
+          !is.null(cmp) && length(cmp$pairs) == 3 &&
+          setequal(names(cmp$sets), c("below", "selected", "above")))
+    txt <- output$slopes
+    check("a stats block per pair, with slope test verdicts",
+          length(gregexpr("== ", txt, fixed = TRUE)[[1]]) == 3 &&
+          grepl("slopes differ|no significant", txt))
+    check("caption reports the compared populations",
+          grepl("comparing", output$counts) &&
+          grepl("below", output$counts))
+})
+
 cat("\nall grapher embedding tests passed\n")
