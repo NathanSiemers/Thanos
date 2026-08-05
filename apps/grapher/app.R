@@ -173,6 +173,15 @@ server <- function(input, output, session) {
     th <- thanosServer("thanos", backend,
                        default_selected = c("carrier", "origin",
                                             "dep_delay", "distance"))
+    ## guard against a STALE loaded thanos: if the package was updated
+    ## while this R session already had an older version attached,
+    ## library(thanos) silently keeps the old one.  Detect the missing
+    ## capability and say exactly what to do.
+    if (!is.function(th$streams)) {
+        stop("the loaded thanos version predates th$streams() - ",
+             "restart the R session (or update the thanos package) ",
+             "and relaunch this app")
+    }
 
     ############################################################
     ## PLUG-IN POINT 5 (OPTIONAL): parent -> module, the ONLY
