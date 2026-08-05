@@ -198,4 +198,25 @@ check("NULL val with include-NA on normalizes away",
           list(num = list(is_numeric = TRUE, val = NULL,
                           include_na = TRUE)), infos)) == 0)
 
+## parsimony: rows() must be INVALIDATION-stable across changes that
+## don't alter its content -- adding an unfiltered column re-ran every
+## consumer before the looStore/globalMask gating.  We count actual
+## re-executions of an observer reading rows().
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     max_discrete_numeric = 0), {
+    session$setInputs(vars = "num")
+    runs <- 0
+    observe({ session$returned$rows(); runs <<- runs + 1 })
+    session$flushReact()
+    r0 <- runs
+    session$setInputs(vars = c("num", "cat"))       # structural, no content change
+    session$setInputs(filter_cat = c("x", "y", "z")) # no-op widget report
+    check("adding an unfiltered column re-runs NO rows() consumer",
+          runs == r0)
+    session$setInputs(filter_num = c(2, 4))          # a real filter change
+    check("a genuine filter change re-runs consumers exactly once",
+          runs == r0 + 1)
+})
+
 cat("\nall module tests passed\n")

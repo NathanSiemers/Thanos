@@ -243,8 +243,8 @@ thanosServer <- function(id, backend,
         ## shared (see bin_counts / plot_histo_counts in thanos_plot.R)
         counts_for <- if (mode == "vector") {
             function(v) {
-                loo <- looMasks()[[v]]
-                req(!is.null(loo))
+                loo <- looStore[[v]]   # per-var gated: only content
+                req(!is.null(loo))     # changes invalidate this plot
                 own <- maskStore[[v]] %||% rep(TRUE, n_rows)
                 bin_counts(cache$var[[v]]$bin, loo, own)
             }
@@ -470,6 +470,7 @@ thanosServer <- function(id, backend,
             for (o in cache$var[[v]]$obs) o$destroy()
             cache$var[[v]] <- NULL
             maskStore[[v]] <- NULL
+            looStore[[v]]  <- NULL
             ## deselecting a column removes its filtering COMPLETELY --
             ## no ghost filters (Project.md note).  With remember_removed
             ## = TRUE the settings are kept and restored on re-add; the
@@ -490,13 +491,24 @@ thanosServer <- function(id, backend,
             if (!identical(new_vars, old_vars)) varsNow(new_vars)
         })
 
-        ## all leave-one-out masks + the global mask in one pass:
-        ## prefix[i] = m1&..&mi, suffix[i] = mi&..&mk,
-        ## loo[i] = prefix[i-1] & suffix[i+1], global = prefix[k]
-        looMasks <- reactive({
+        ## all leave-one-out masks + the global mask in one pass
+        ## (prefix[i] = m1&..&mi, suffix[i] = mi&..&mk,
+        ##  loo[i] = prefix[i-1] & suffix[i+1], global = prefix[k]),
+        ## then EQUALITY-GATED per variable into looStore and
+        ## globalMaskVal: a structural change (adding an unfiltered
+        ## column) recomputes here but invalidates ONLY the entries
+        ## whose content changed -- untouched plots are not even
+        ## pulsed, and rows()/mask() stay bit-stable for parent apps
+        ## (so e.g. the grapher's sampled scatter is not re-drawn).
+        looStore <- reactiveValues()       # var -> loo mask
+        globalMaskVal <- reactiveVal(NULL) # AND of all masks
+        observe({
             vs <- varsNow()
             k <- length(vs)
-            if (k == 0) return(structure(list(), global = NULL))
+            if (k == 0) {
+                if (!is.null(isolate(globalMaskVal()))) globalMaskVal(NULL)
+                return()
+            }
             ms <- lapply(vs, function(v) maskStore[[v]] %||% rep(TRUE, n_rows))
             prefix <- vector("list", k)
             suffix <- vector("list", k)
@@ -506,17 +518,20 @@ thanosServer <- function(id, backend,
             acc <- ms[[k]]
             suffix[[k]] <- acc
             for (i in rev(seq_len(k)[-k])) { acc <- acc & ms[[i]]; suffix[[i]] <- acc }
-            loo <- vector("list", k)
             for (i in seq_len(k)) {
                 left  <- if (i > 1) prefix[[i - 1]] else NULL
                 right <- if (i < k) suffix[[i + 1]] else NULL
-                loo[[i]] <- if (is.null(left) && is.null(right)) rep(TRUE, n_rows)
-                            else if (is.null(left)) right
-                            else if (is.null(right)) left
-                            else left & right
+                loo <- if (is.null(left) && is.null(right)) rep(TRUE, n_rows)
+                       else if (is.null(left)) right
+                       else if (is.null(right)) left
+                       else left & right
+                if (!identical(loo, isolate(looStore[[vs[i]]]))) {
+                    looStore[[vs[i]]] <- loo
+                }
             }
-            names(loo) <- vs
-            structure(loo, global = prefix[[k]])
+            if (!identical(prefix[[k]], isolate(globalMaskVal()))) {
+                globalMaskVal(prefix[[k]])
+            }
         })
 
         ## current filter settings of every active variable, in the shape
@@ -546,7 +561,7 @@ thanosServer <- function(id, backend,
             if (mode == "aggregate") {
                 backend$get_row_mask(filtersNow())
             } else {
-                attr(looMasks(), "global") %||% rep(TRUE, n_rows)
+                globalMaskVal() %||% rep(TRUE, n_rows)
             }
         })
         nSelected <- reactive({
@@ -578,7 +593,7 @@ thanosServer <- function(id, backend,
                 st <- cache$var[[v]]
                 if (mode == "vector") {
                     universe <- if (!is.null(st)) {
-                        looMasks()[[v]] %||% rep(TRUE, n_rows)
+                        looStore[[v]] %||% rep(TRUE, n_rows)
                     } else globalMask()
                     x <- if (!is.null(st)) st$col else backend$get_column(v)
                     val <- if (!is.null(st)) filterState$filters[[v]]

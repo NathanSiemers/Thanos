@@ -99,4 +99,28 @@ testServer(grapher_server, {
           grepl("below", output$counts))
 })
 
+## parsimony in the real app: changing x should cost exactly ONE
+## scatter-data recompute (for the new x) -- the arr_time panel
+## addition that follows must not re-trigger it
+testServer(grapher_server, {
+    session$setInputs(x = "dep_delay", y = "arr_delay",
+                      color = "(none)", size = "(none)",
+                      show_excluded = FALSE, fit_slopes = FALSE)
+    session$setInputs(`thanos-vars` = "dep_delay")
+    session$setInputs(`thanos-filter_dep_delay` = c(-10, 30))
+    session$elapse(400)
+    runs <- 0
+    observe({ plot_data(); runs <<- runs + 1 })
+    session$flushReact()
+    r0 <- runs
+    ## the user picks a new x; the add_vars observer then adds it to the
+    ## module (simulated round trip), whose widget reports a full-range
+    ## no-op filter
+    session$setInputs(x = "arr_time")
+    session$setInputs(`thanos-vars` = c("dep_delay", "arr_time"))
+    session$elapse(400)
+    check("changing x costs exactly one scatter-data recompute",
+          runs == r0 + 1)
+})
+
 cat("\nall grapher embedding tests passed\n")
