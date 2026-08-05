@@ -215,6 +215,9 @@ server <- function(input, output, session) {
         cols <- unique(c(input$x, input$y,
                          setdiff(c(input$color, input$size), "(none)")))
         r <- plot_rows()
+        ## with a DB backend these per-interaction reads are free after
+        ## first touch: backends cache fetched columns (cache = TRUE
+        ## default), so only the first read of a column hits the database
         df <- as.data.frame(lapply(setNames(cols, cols),
                                    function(cn) backend$get_column(cn)[r]))
         keep <- complete.cases(df)

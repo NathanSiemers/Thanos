@@ -86,6 +86,17 @@ stale render can be in flight. While a plot recalculates it pulses
 gently — CSS scoped to the module's own panels, so a host app is
 never restyled.
 
+**Caching** (DB backends, on by default): fetched columns are kept for
+the backend's lifetime and aggregate query results are memoised
+(bounded, oldest evicted), so re-selecting a column, a parent app
+re-reading columns per interaction, and revisited filter states cost
+nothing after first touch (flights: 213 ms cold → ~0 ms warm). The
+cache assumes the database is immutable while open — construct with
+`cache = FALSE` for mutable data (or to cap memory when fetching
+38M-row columns), call `backend$clear_cache()` after a data change,
+and inspect `backend$cache_stats()` for hits/misses/bytes.
+`backend_memory` needs no cache (the data is already in RAM).
+
 ## Two execution modes
 
 `thanosServer()` picks a mode automatically (`mode = "auto"`):
