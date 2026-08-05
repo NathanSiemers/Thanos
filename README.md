@@ -10,12 +10,29 @@ See `Project.md` for the project goals and roadmap, and `design.md`
 for the architecture: the layering, the data shapes the pieces
 exchange, the reactive graph, and the reasoning behind them.
 
+## Install
+
+```r
+# as a package (recommended)
+pak::pak("NathanSiemers/Thanos")   # or remotes::install_github
+library(thanos)
+
+# or dependency-free from a checkout
+source("thanos.R")
+```
+
+Both routes publish the same six functions (`thanosUI`, `thanosServer`,
+`backend_memory`, `backend_dbi`, `backend_sqlite`, `backend_duckdb`);
+the `source()` route additionally provides `thanos`, a handle to the
+private namespace holding the internals.
+
 ## Layout
 
-- `R/` — the sourceable module code
-  - `thanos.R` — **the loader: `source()` this one file.** Defines the
-    public API (`thanosUI`, `thanosServer`, `backend_*`) plus `thanos`,
-    a handle to the private namespace holding all internals
+- `thanos.R` — **the no-install loader, at the repo root:
+  `source()` this one file.** Defines the public API (`thanosUI`,
+  `thanosServer`, `backend_*`) plus `thanos`, a handle to the private
+  namespace holding all internals
+- `R/` — the module code (both the package and the loader use it)
   - `thanos_module.R` — `thanosUI()` / `thanosServer()` (the module)
   - `thanos_backend.R` — backend contract + `backend_memory(df)`
   - `thanos_backend_sqlite.R` — `backend_dbi()` over the tall/skinny
@@ -42,14 +59,19 @@ shiny::runApp("apps/grapher")        # scatter app embedding Thanos
 shiny::runApp("apps/demo_big")       # 38M-row taxi data, aggregate mode
 ```
 
-Databases for the last two demos are built with:
+One command prepares everything a fresh checkout needs (installs demo
+dependencies, builds the demo databases; idempotent, skips what exists):
 
 ```sh
-Rscript db/build_flights_sqlite.R    # flights -> db/data/flights.sqlite
-# download parquet months into db/data/tlc/ first (see script header):
-Rscript db/build_big_duckdb.R        # taxi -> db/data/taxi.duckdb (fast)
-Rscript db/build_big_sqlite.R        # taxi -> db/data/taxi.sqlite
+Rscript db/setup_demos.R          # deps + flights.sqlite  (~1 minute)
+Rscript db/setup_demos.R big      # + downloads NYC taxi parquet and
+                                  #   builds taxi.duckdb for demo_big
+Rscript db/setup_demos.R big 12   # ...with 12 months instead of 3
 ```
+
+(The underlying build scripts remain individually runnable:
+`db/build_flights_sqlite.R`, `db/build_big_duckdb.R`,
+`db/build_big_sqlite.R`.)
 
 Deselecting a column removes its filtering **completely** — the stored
 settings are forgotten too, so there is never a ghost filter from a
@@ -140,9 +162,10 @@ with the parent/module interaction contract documented inline. Short
 version:
 
 ```r
-source("R/thanos.R")   # one file; publics only, internals stay in a
-                       # private namespace (no name collisions with
-                       # your app in either direction)
+library(thanos)        # installed package -- or, with no install:
+source("thanos.R")     # one file at the repo root; publics only,
+                       # internals stay in a private namespace (no name
+                       # collisions with your app in either direction)
 
 backend <- backend_memory(my_data_frame)      # or a DB backend
 

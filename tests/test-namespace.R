@@ -1,6 +1,8 @@
 ################################################################
-## Namespace loader (R/thanos.R): publics exported, internals hidden,
-## and name collisions with a host app harm neither side.
+## Namespace loader (thanos.R at the repo root): publics exported,
+## internals hidden, and name collisions with a host app harm neither
+## side.  Also checks the loader's export list against the package
+## NAMESPACE, so the two distribution routes cannot drift apart.
 ## Run from the repo root:  Rscript tests/test-namespace.R
 ################################################################
 suppressPackageStartupMessages({
@@ -21,9 +23,9 @@ make_mask     <- function(...) stop("host make_mask called by Thanos!")
 display_range <- function(...) stop("host display_range called by Thanos!")
 host_mask     <- make_mask
 
-root <- Filter(function(p) file.exists(file.path(p, "R", "thanos.R")),
+root <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
                c(".", ".."))[1]
-source(file.path(root, "R", "thanos.R"))
+source(file.path(root, "thanos.R"))
 
 check("public API exported",
       all(vapply(c("thanosUI", "thanosServer", "backend_memory",
@@ -37,6 +39,16 @@ check("namespace handle exposes internals for power users",
       is.function(thanos$make_mask) && is.function(thanos$bin_column))
 check("exported functions resolve helpers in the private namespace",
       identical(environment(thanosServer), thanos))
+
+## the package and the loader must publish the SAME public API: parse
+## the NAMESPACE export() lines and compare against the loader's list
+loader_api <- c("thanosUI", "thanosServer", "backend_memory",
+                "backend_dbi", "backend_sqlite", "backend_duckdb")
+ns_lines <- readLines(file.path(root, "NAMESPACE"))
+ns_exports <- sub("^export\\(", "",
+                  sub("\\)$", "", grep("^export\\(", ns_lines, value = TRUE)))
+check("loader and NAMESPACE agree on the public API",
+      setequal(ns_exports, loader_api))
 
 ## the module must work end to end while the host's poisoned
 ## make_mask/display_range sit in the global environment

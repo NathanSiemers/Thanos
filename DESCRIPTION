@@ -1,0 +1,33 @@
+Package: thanos
+Title: Reusable Cross-Filtering Module for Shiny
+Version: 0.1.0
+Authors@R:
+    person("Nathan", "Siemers", role = c("aut", "cre"),
+           email = "nathan.siemers@gmail.com")
+Description: Interactive cross-filter histograms as a Shiny module:
+    pick columns, get auto-generated filter widgets (sliders for
+    numerics, checkboxes for categoricals), and every variable's
+    histogram updates live to show the rows passing all other filters,
+    with its own selection overlaid. Backends are pluggable -- an
+    in-memory data frame, or 'SQLite'/'DuckDB' databases in a
+    tall/skinny schema -- and an aggregate mode pushes histogram counts
+    to SQL 'GROUP BY' queries so data at the scale of tens of millions
+    of rows can be filtered without a column vector ever entering R.
+License: GPL (>= 3)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Depends:
+    R (>= 4.4)
+Imports:
+    shiny,
+    ggplot2,
+    jsonlite,
+    viridisLite
+Suggests:
+    DBI,
+    RSQLite,
+    duckdb,
+    ragg,
+    nycflights13,
+    dplyr

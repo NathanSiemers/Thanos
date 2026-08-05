@@ -47,7 +47,8 @@ R/thanos_backend.R        the contract + backend_memory
 R/thanos_backend_sqlite.R backend_dbi (SQL generation, aggregation,
    │                      caching) + sqlite/duckdb wrappers
 R/thanos_theme.R  visual identity (compact theme, plasma pair)
-R/thanos.R        loader: private namespace, public API only
+thanos.R (repo root)  loader: private namespace, public API only
+                  (the no-install alternative to the installed package)
 ```
 
 `db/` build scripts create the tall/skinny schema; `bench/` scripts
@@ -173,9 +174,13 @@ connections are backend concerns invisible to the module.
   quantiles) and cannot reuse the whole-column helpers without
   holding 38M-row columns in memory. The duckdb build computes stats
   in SQL for the same reason.
-- **No R package yet**: the loader provides the namespace benefit
-  without changing `source()`-based usage (Project.md constraint).
-  The file layout is already package-shaped if that changes.
+- **Hybrid distribution, package-first**: the repo IS an installable R
+  package (`DESCRIPTION`/`NAMESPACE`/`man/` over the same `R/` tree),
+  and the repo-root loader `thanos.R` is kept as the no-install
+  fallback for `source()`-based usage (Project.md constraint). One
+  source tree serves both routes, and the public API list is kept
+  honest by the NAMESPACE-vs-loader check in
+  `tests/test-namespace.R`.
 
 ## Verification methodology
 

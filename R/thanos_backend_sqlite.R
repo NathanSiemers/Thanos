@@ -36,6 +36,44 @@
 ## cache = FALSE for mutable data or to cap memory at very large scale.
 ################################################################
 
+#' DBI backend over the tall/skinny Thanos schema
+#'
+#' Implements the Thanos backend contract for any DBI connection
+#' holding the tall/skinny schema `long_data(row_id, column_name,
+#' value_num, value_txt)` plus a `column_registry` metadata table (see
+#' the build scripts under `db/` in the Thanos repository). Beyond the
+#' column-store contract it advertises the aggregate capability
+#' (`supports_binned`): histogram counts, row counts, and row masks are
+#' computed by SQL `GROUP BY` queries, so tens of millions of rows can
+#' be filtered without a column vector ever entering R.
+#'
+#' Fetched columns and aggregate query results are cached by default;
+#' the cache assumes the database is immutable while the backend is
+#' open. Call `$clear_cache()` after a data change and
+#' `$cache_stats()` for hits/misses/bytes.
+#'
+#' @param con A `DBI` connection to a database holding the tall/skinny
+#'   schema.
+#' @param table Name of the tall/skinny data table.
+#' @param registry Name of the column-registry metadata table.
+#' @param cache Cache fetched columns and memoise aggregate query
+#'   results (assumes the database is immutable while open).
+#' @param cache_max_entries Maximum number of memoised aggregate query
+#'   results (oldest evicted first).
+#'
+#' @return A backend implementing the Thanos backend contract, with the
+#'   aggregate-mode extensions (`supports_binned`, `get_binned`,
+#'   `get_binned_pair`, `get_count`, `get_row_mask`), caching accessors
+#'   (`clear_cache`, `cache_stats`), and `disconnect()`.
+#'
+#' @examples
+#' \dontrun{
+#' con <- DBI::dbConnect(RSQLite::SQLite(), "db/data/flights.sqlite")
+#' backend <- backend_dbi(con)
+#' backend$get_columns()
+#' backend$disconnect()
+#' }
+#' @export
 backend_dbi <- function(con,
                         table = "long_data",
                         registry = "column_registry",
@@ -375,6 +413,25 @@ backend_dbi <- function(con,
 ## (multiple app instances, benchmarks, an interactive session) can
 ## share one database file; the backends never need write access -- the
 ## row_universe helper falls back to a TEMP table when absent.
+#' SQLite backend over the tall/skinny Thanos schema
+#'
+#' Thin wrapper around [backend_dbi()] that opens a SQLite database
+#' file, read-only by default so any number of processes can share it.
+#'
+#' @param db_path Path to the SQLite database file (tall/skinny schema;
+#'   see the build scripts under `db/` in the Thanos repository).
+#' @param read_only Open the database read-only (default `TRUE`).
+#' @inheritParams backend_dbi
+#'
+#' @return A backend as described in [backend_dbi()].
+#'
+#' @examples
+#' \dontrun{
+#' backend <- backend_sqlite("db/data/flights.sqlite")
+#' backend$n_rows()
+#' backend$disconnect()
+#' }
+#' @export
 backend_sqlite <- function(db_path,
                            table = "long_data",
                            registry = "column_registry",
@@ -392,6 +449,26 @@ backend_sqlite <- function(db_path,
                 cache = cache, cache_max_entries = cache_max_entries)
 }
 
+#' DuckDB backend over the tall/skinny Thanos schema
+#'
+#' Thin wrapper around [backend_dbi()] that opens a DuckDB database
+#' file, read-only by default. The recommended backend at many millions
+#' of rows (aggregate mode).
+#'
+#' @param db_path Path to the DuckDB database file (tall/skinny schema;
+#'   see the build scripts under `db/` in the Thanos repository).
+#' @param read_only Open the database read-only (default `TRUE`).
+#' @inheritParams backend_dbi
+#'
+#' @return A backend as described in [backend_dbi()].
+#'
+#' @examples
+#' \dontrun{
+#' backend <- backend_duckdb("db/data/taxi.duckdb")
+#' backend$n_rows()
+#' backend$disconnect()
+#' }
+#' @export
 backend_duckdb <- function(db_path,
                            table = "long_data",
                            registry = "column_registry",

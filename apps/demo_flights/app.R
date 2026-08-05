@@ -7,12 +7,18 @@ library(shiny)
 library(ggplot2)
 library(nycflights13)
 
-## one line loads Thanos: publics land here, internals stay in a
-## private namespace (see R/thanos.R)
-thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
-                       c("R", "../R", "../../R"))[1]
-if (is.na(thanos_r_dir)) stop("cannot locate the Thanos R/ directory")
-source(file.path(thanos_r_dir, "thanos.R"))
+## load Thanos: prefer the installed package; fall back to sourcing the
+## repo-root loader (publics land here, internals stay private either way)
+if (requireNamespace("thanos", quietly = TRUE)) {
+    library(thanos)
+} else {
+    thanos_loader <- Filter(file.exists,
+                            file.path(c(".", "..", "../.."), "thanos.R"))[1]
+    if (is.na(thanos_loader)) {
+        stop("install the thanos package or run from the repo checkout")
+    }
+    source(thanos_loader)
+}
 
 flights_df <- as.data.frame(nycflights13::flights)
 backend <- backend_memory(flights_df)

@@ -1,0 +1,17 @@
+^LICENSE$
+^apps$
+^bench$
+^db$
+^attic$
+^tests$
+^design\.md$
+^Project\.md$
+^thanos\.R$
+^package\.json$
+^package-lock\.json$
+^token$
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.claude$
+^\.github$
+^\.gitignore$

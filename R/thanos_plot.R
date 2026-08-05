@@ -2,7 +2,6 @@
 ## Pure (Shiny-free) helpers for masks, binning, and histograms.
 ## Everything here is unit-testable from a plain R session.
 ################################################################
-library(ggplot2)
 
 ## Logical mask for one variable's filter setting.
 ##   x          full column vector (numeric or character)

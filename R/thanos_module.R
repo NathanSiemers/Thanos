@@ -33,8 +33,29 @@
 ##   - per-variable lifecycle state is one object (cache$var[[v]]),
 ##     created whole by add_var() and deleted whole by remove_var()
 ################################################################
-library(shiny)
-
+#' Thanos cross-filter module UI
+#'
+#' Places the module's user interface: a column picker plus an anchor
+#' `div` into which per-variable filter panels (widget + live
+#' cross-filter histogram) are inserted and removed individually as the
+#' user selects columns. Pair with [thanosServer()] using the same `id`.
+#'
+#' @param id Module id; must match the `id` given to [thanosServer()].
+#' @param width CSS width of the column picker (default `"100%"`).
+#'
+#' @return A [shiny::tagList()] of UI elements to place in your layout.
+#'
+#' @examples
+#' \donttest{
+#' library(shiny)
+#' backend <- backend_memory(mtcars)
+#' ui <- fluidPage(thanosUI("thanos"))
+#' server <- function(input, output, session) {
+#'     th <- thanosServer("thanos", backend)
+#' }
+#' if (interactive()) shinyApp(ui, server)
+#' }
+#' @export
 thanosUI <- function(id, width = "100%") {
     ns <- NS(id)
     tagList(
@@ -60,6 +81,73 @@ thanosUI <- function(id, width = "100%") {
     )
 }
 
+#' Thanos cross-filter module server
+#'
+#' Drives the cross-filter module against any backend implementing the
+#' Thanos backend contract (see [backend_memory()], [backend_dbi()]).
+#' Each selected column gets an auto-chosen filter widget (slider,
+#' checkboxes, or selectize) and a live histogram of the rows passing
+#' all *other* filters, with this variable's own selection overlaid.
+#'
+#' @param id Module id; must match the `id` given to [thanosUI()].
+#' @param backend A backend object, e.g. from [backend_memory()],
+#'   [backend_sqlite()], or [backend_duckdb()].
+#' @param default_selected Character vector of columns pre-selected for
+#'   filtering at startup (unknown names are ignored).
+#' @param bins Number of histogram bins for continuous numeric columns.
+#' @param debounce_ms Debounce interval (ms) for slider inputs.
+#' @param debounce_checkbox_ms Debounce interval (ms) for checkbox
+#'   groups and selectize filters.
+#' @param plot_height CSS height of each histogram.
+#' @param max_checkbox_levels Categorical columns with at most this many
+#'   levels get checkboxes; above it, a selectize input.
+#' @param mode `"auto"` (default), `"vector"`, or `"aggregate"`.
+#'   Vector mode fetches whole columns once and filters in R; aggregate
+#'   mode never fetches columns and asks the backend for binned counts
+#'   via SQL. `"auto"` picks aggregate when the backend supports it and
+#'   the data exceeds `aggregate_threshold` rows.
+#' @param aggregate_threshold Row count above which `"auto"` switches to
+#'   aggregate mode.
+#' @param remember_removed If `TRUE`, a removed column's filter settings
+#'   are kept and restored when it is re-added; if `FALSE` (default)
+#'   removing a column clears its filter completely.
+#' @param removal_note Show the one-line in-page note explaining what
+#'   removing a column does.
+#' @param max_discrete_numeric Numeric columns with at most this many
+#'   distinct values are treated as discrete (checkboxes with
+#'   membership semantics) instead of getting a range slider.
+#' @param plot_engine `"base"` (default; identical visual at a fraction
+#'   of the rendering cost) or `"ggplot"`.
+#'
+#' @return A list of accessors for the parent app:
+#'   \describe{
+#'     \item{`mask()`}{reactive: `logical(n_rows)`, `TRUE` = row passes
+#'       all filters}
+#'     \item{`rows()`}{reactive: integer row IDs passing all filters}
+#'     \item{`n_selected()`}{reactive: number of rows passing}
+#'     \item{`selected_vars()`}{reactive: currently selected columns}
+#'     \item{`filters()`}{reactive: named list of current filter values
+#'       in raw units (save/restore, bookmarking)}
+#'     \item{`add_vars(cols)`}{function: ensure these columns appear in
+#'       the filter selection (additive, idempotent)}
+#'   }
+#'
+#' @examples
+#' \donttest{
+#' library(shiny)
+#' backend <- backend_memory(as.data.frame(mtcars))
+#' ui <- fluidPage(
+#'     thanosUI("thanos"),
+#'     verbatimTextOutput("n")
+#' )
+#' server <- function(input, output, session) {
+#'     th <- thanosServer("thanos", backend,
+#'                        default_selected = c("mpg", "cyl"))
+#'     output$n <- renderText(th$n_selected())
+#' }
+#' if (interactive()) shinyApp(ui, server)
+#' }
+#' @export
 thanosServer <- function(id, backend,
                          default_selected = NULL,
                          bins = 50,

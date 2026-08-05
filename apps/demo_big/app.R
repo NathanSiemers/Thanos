@@ -4,22 +4,31 @@
 ## pushed to the backend, chosen automatically because n_rows exceeds
 ## the aggregate threshold.
 ##
-## Build a database first (duckdb strongly recommended at this scale):
-##   Rscript db/build_big_duckdb.R      # db/data/taxi.duckdb
-##   Rscript db/build_big_sqlite.R      # db/data/taxi.sqlite (slower)
+## One-command setup (downloads taxi parquet months, builds the db):
+##   Rscript db/setup_demos.R big
 ## Then:  shiny::runApp("apps/demo_big")
 ################################################################
 library(shiny)
 library(ggplot2)
 
-## one line loads Thanos: publics land here, internals stay in a
-## private namespace (see R/thanos.R)
-thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
-                       c("R", "../R", "../../R"))[1]
-if (is.na(thanos_r_dir)) stop("cannot locate the Thanos R/ directory")
-source(file.path(thanos_r_dir, "thanos.R"))
+## load Thanos: prefer the installed package; fall back to sourcing the
+## repo-root loader (publics land here, internals stay private either way)
+if (requireNamespace("thanos", quietly = TRUE)) {
+    library(thanos)
+} else {
+    thanos_loader <- Filter(file.exists,
+                            file.path(c(".", "..", "../.."), "thanos.R"))[1]
+    if (is.na(thanos_loader)) {
+        stop("install the thanos package or run from the repo checkout")
+    }
+    source(thanos_loader)
+}
 
-data_dir <- file.path(dirname(thanos_r_dir), "db", "data")
+## the demo databases live in the repo checkout: locate the repo root
+## by probing for its db/ directory
+thanos_db_dir <- Filter(dir.exists, file.path(c(".", "..", "../.."), "db"))[1]
+if (is.na(thanos_db_dir)) stop("cannot locate the repo's db/ directory")
+data_dir <- file.path(thanos_db_dir, "data")
 duck_path <- file.path(data_dir, "taxi.duckdb")
 sqlite_path <- file.path(data_dir, "taxi.sqlite")
 backend <- if (file.exists(duck_path) &&

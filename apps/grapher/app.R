@@ -6,7 +6,7 @@
 ## acquired filtering by adding Thanos at FOUR required points plus one
 ## optional one, each marked with a "PLUG-IN POINT" banner below:
 ##
-##   1. source the Thanos loader              (once, at startup)
+##   1. load Thanos (package or loader)       (once, at startup)
 ##   2. create a backend around your data     (once, at startup)
 ##   3. thanosUI("<id>")   somewhere in ui    (one line)
 ##   4. thanosServer("<id>", backend, ...) in server(), keeping its
@@ -59,19 +59,30 @@ library(ggplot2)
 library(nycflights13)
 
 ################################################################
-## PLUG-IN POINT 1 of 4: source the Thanos loader -- ONE file.
-## An established app copies the R/ directory (or adds this repo as a
-## submodule) and sources R/thanos.R.  That defines exactly six
-## functions here (thanosUI, thanosServer, backend_memory, backend_dbi,
-## backend_sqlite, backend_duckdb) plus `thanos`, a handle to the
-## private namespace.  All internals stay inside that namespace, so
-## nothing Thanos uses can collide with functions your app defines,
-## and your same-named functions cannot break the module.
+## PLUG-IN POINT 1 of 4: load Thanos.  Two equivalent ways:
+##   a) install the thanos package once (pak::pak("NathanSiemers/Thanos")
+##      or remotes::install_github), then library(thanos), or
+##   b) no install at all: copy this repo (or add it as a submodule)
+##      and source the ONE loader file, thanos.R, at its root.
+## Either way exactly six functions are defined here (thanosUI,
+## thanosServer, backend_memory, backend_dbi, backend_sqlite,
+## backend_duckdb); the source() route additionally provides `thanos`,
+## a handle to the private namespace.  All internals stay inside a
+## namespace in both cases, so nothing Thanos uses can collide with
+## functions your app defines, and your same-named functions cannot
+## break the module.  The shim below prefers the package and falls
+## back to the loader, so this app runs in both worlds.
 ################################################################
-thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
-                       c("R", "../R", "../../R"))[1]
-if (is.na(thanos_r_dir)) stop("cannot locate the Thanos R/ directory")
-source(file.path(thanos_r_dir, "thanos.R"))
+if (requireNamespace("thanos", quietly = TRUE)) {
+    library(thanos)
+} else {
+    thanos_loader <- Filter(file.exists,
+                            file.path(c(".", "..", "../.."), "thanos.R"))[1]
+    if (is.na(thanos_loader)) {
+        stop("install the thanos package or run from the repo checkout")
+    }
+    source(thanos_loader)
+}
 
 ################################################################
 ## PLUG-IN POINT 2 of 4: wrap your data in a backend.

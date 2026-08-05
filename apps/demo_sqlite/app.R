@@ -4,20 +4,30 @@
 ## meaningful difference is the backend constructor line -- which is
 ## the point of the backend abstraction.
 ##
-## First build the database:  Rscript db/build_flights_sqlite.R
+## First build the database:  Rscript db/setup_demos.R
 ## Then:                      shiny::runApp("apps/demo_sqlite")
 ################################################################
 library(shiny)
 library(ggplot2)
 
-## one line loads Thanos: publics land here, internals stay in a
-## private namespace (see R/thanos.R)
-thanos_r_dir <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
-                       c("R", "../R", "../../R"))[1]
-if (is.na(thanos_r_dir)) stop("cannot locate the Thanos R/ directory")
-source(file.path(thanos_r_dir, "thanos.R"))
+## load Thanos: prefer the installed package; fall back to sourcing the
+## repo-root loader (publics land here, internals stay private either way)
+if (requireNamespace("thanos", quietly = TRUE)) {
+    library(thanos)
+} else {
+    thanos_loader <- Filter(file.exists,
+                            file.path(c(".", "..", "../.."), "thanos.R"))[1]
+    if (is.na(thanos_loader)) {
+        stop("install the thanos package or run from the repo checkout")
+    }
+    source(thanos_loader)
+}
 
-db_path <- file.path(dirname(thanos_r_dir), "db", "data", "flights.sqlite")
+## the demo database lives in the repo checkout: locate the repo root
+## by probing for its db/ directory
+thanos_db_dir <- Filter(dir.exists, file.path(c(".", "..", "../.."), "db"))[1]
+if (is.na(thanos_db_dir)) stop("cannot locate the repo's db/ directory")
+db_path <- file.path(thanos_db_dir, "data", "flights.sqlite")
 if (!file.exists(db_path)) {
     stop("no database at ", db_path,
          " - run:  Rscript db/build_flights_sqlite.R")

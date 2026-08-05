@@ -2,7 +2,6 @@
 ## Thanos visual identity: compact histogram theme + the plasma
 ## sel/unsel fill scale, both carried over from the original thanos.R
 ################################################################
-library(ggplot2)
 
 theme_thanos <- theme(
     axis.text.x  = element_text(size = 12),

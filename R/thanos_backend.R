@@ -24,6 +24,26 @@
 ## In-memory backend wrapping a data frame.  Column type handling and
 ## statistics live in thanos_columns.R, shared with the database build
 ## scripts so all data paths agree by construction.
+#' In-memory backend wrapping a data frame
+#'
+#' Wraps a data frame in the Thanos backend contract: the module treats
+#' it as a column store and fetches each column at most once while it
+#' stays selected. Factors and logicals are coerced to character,
+#' Date/POSIXct to numeric (epoch values), integers to double;
+#' non-atomic (e.g. list) columns are dropped.
+#'
+#' @param df A data frame (or anything `as.data.frame()` accepts).
+#'
+#' @return A backend: a named list of functions (`get_columns`,
+#'   `n_rows`, `get_column`, `get_column_info`) implementing the Thanos
+#'   backend contract, suitable for [thanosServer()].
+#'
+#' @examples
+#' backend <- backend_memory(mtcars)
+#' backend$n_rows()
+#' backend$get_columns()
+#' backend$get_column_info("mpg")$is_numeric
+#' @export
 backend_memory <- function(df) {
     df <- thanos_coerce_columns(df)
     info_cache <- new.env(parent = emptyenv())
