@@ -72,8 +72,11 @@ backend_dbi <- function(con,
         if (universe_ready) return(invisible())
         have <- DBI::dbExistsTable(con, "row_universe")
         if (!have) {
+            ## a TEMP table so this works on READ-ONLY connections
+            ## (temp storage is separate from the database file); build
+            ## scripts create a permanent one, which is found above
             DBI::dbExecute(con,
-                "CREATE TABLE row_universe (row_id INTEGER PRIMARY KEY)")
+                "CREATE TEMP TABLE row_universe (row_id INTEGER PRIMARY KEY)")
             filled <- tryCatch({  # duckdb fast path
                 DBI::dbExecute(con, sprintf(
                     "INSERT INTO row_universe SELECT * FROM range(1, %d)",
@@ -422,16 +425,24 @@ backend_dbi <- function(con,
     )
 }
 
+## Both wrappers open READ-ONLY by default so any number of processes
+## (multiple app instances, benchmarks, an interactive session) can
+## share one database file; the backends never need write access -- the
+## row_universe helper falls back to a TEMP table when absent.
 backend_sqlite <- function(db_path,
                            table = "long_data",
                            registry = "column_registry",
                            cache = TRUE,
-                           cache_max_entries = 256) {
+                           cache_max_entries = 256,
+                           read_only = TRUE) {
     if (!requireNamespace("DBI", quietly = TRUE) ||
         !requireNamespace("RSQLite", quietly = TRUE)) {
         stop("backend_sqlite needs the DBI and RSQLite packages")
     }
-    backend_dbi(DBI::dbConnect(RSQLite::SQLite(), db_path), table, registry,
+    con <- DBI::dbConnect(RSQLite::SQLite(), db_path,
+                          flags = if (read_only) RSQLite::SQLITE_RO
+                                  else RSQLite::SQLITE_RW)
+    backend_dbi(con, table, registry,
                 cache = cache, cache_max_entries = cache_max_entries)
 }
 
@@ -439,13 +450,14 @@ backend_duckdb <- function(db_path,
                            table = "long_data",
                            registry = "column_registry",
                            cache = TRUE,
-                           cache_max_entries = 256) {
+                           cache_max_entries = 256,
+                           read_only = TRUE) {
     if (!requireNamespace("DBI", quietly = TRUE) ||
         !requireNamespace("duckdb", quietly = TRUE)) {
         stop("backend_duckdb needs the DBI and duckdb packages")
     }
     backend_dbi(DBI::dbConnect(duckdb::duckdb(), dbdir = db_path,
-                               read_only = FALSE),
+                               read_only = read_only),
                 table, registry,
                 cache = cache, cache_max_entries = cache_max_entries)
 }
