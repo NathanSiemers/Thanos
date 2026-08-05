@@ -69,7 +69,12 @@ thanosServer <- function(id, backend,
                          aggregate_threshold = 2e6,
                          remember_removed = FALSE,
                          removal_note = TRUE,
-                         max_discrete_numeric = 12) {
+                         max_discrete_numeric = 12,
+                         plot_engine = c("base", "ggplot")) {
+    ## "base" draws the identical visual with base graphics at a fraction
+    ## of ggplot's per-render overhead (see bench/bench_plots.R);
+    ## "ggplot" remains available if a host app needs grid graphics
+    plot_engine <- match.arg(plot_engine)
     mode <- match.arg(mode)
     moduleServer(id, function(input, output, session) {
         ns <- session$ns
@@ -249,12 +254,34 @@ thanosServer <- function(id, backend,
             plot_label <- function() {
                 if (isTRUE(filterState$log[[v]])) paste0(v, " (log2+1)") else v
             }
+            ## both engines draw the same visual; "base" skips the
+            ## ggplot/grid pipeline (a ggplot object must be returned for
+            ## renderPlot to print, base draws directly and returns NULL)
+            draw <- function(spec, shown, sel, n_shown, n_sel, label) {
+                if (plot_engine == "base") {
+                    plot_histo_counts_base(spec, shown, sel, n_shown, n_sel,
+                                           label)
+                } else {
+                    plot_histo_counts(spec, shown, sel, n_shown, n_sel, label)
+                }
+            }
             output[[paste0("plot_", id)]] <- if (mode == "vector") {
                 renderPlot({
                     loo <- looMasks()[[v]]
                     req(!is.null(loo))
                     own <- maskStore[[v]] %||% rep(TRUE, n_rows)
-                    plot_histo(cache$bin[[v]], loo, own, plot_label())
+                    bin <- cache$bin[[v]]
+                    if (bin$nbins == 0) {
+                        draw(bin, integer(0), integer(0),
+                             sum(loo), sum(own & loo), plot_label())
+                    } else {
+                        draw(bin,
+                             shown = tabulate(bin$idx[loo], nbins = bin$nbins),
+                             sel   = tabulate(bin$idx[own & loo],
+                                              nbins = bin$nbins),
+                             n_shown = sum(loo), n_sel = sum(own & loo),
+                             plot_label())
+                    }
                 })
             } else {
                 renderPlot({
@@ -265,11 +292,10 @@ thanosServer <- function(id, backend,
                     ## one combined query for both count vectors, and the
                     ## global row count is a reactive shared by all plots
                     pair <- backend$get_binned_pair(v, spec, loo_f, fl[[v]])
-                    plot_histo_counts(
-                        spec, shown = pair$shown, sel = pair$sel,
-                        n_shown = backend$get_count(loo_f),
-                        n_sel   = nSelected(),
-                        plot_label())
+                    draw(spec, shown = pair$shown, sel = pair$sel,
+                         n_shown = backend$get_count(loo_f),
+                         n_sel   = nSelected(),
+                         plot_label())
                 })
             }
         }

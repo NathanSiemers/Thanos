@@ -96,4 +96,18 @@ check("categorical plot is a ggplot", inherits(p2, "ggplot"))
 p3 <- plot_histo(bin_column(character(0)), logical(0), logical(0), "empty")
 check("empty column plot is a ggplot", inherits(p3, "ggplot"))
 
+## ---- base-graphics engine draws without error ----
+tmp_png <- tempfile(fileext = ".png")
+png(tmp_png, width = 400, height = 150)
+plot_histo_counts_base(bz, tabulate(bz$idx[loo], bz$nbins),
+                       tabulate(bz$idx[own & loo], bz$nbins),
+                       sum(loo), sum(own & loo), "z")
+plot_histo_counts_base(bc, c(2L, 2L), c(1L, 2L), 4, 3, "cat")
+plot_histo_counts_base(bin_column(character(0)), integer(0), integer(0),
+                       0, 0, "empty")
+dev.off()
+check("base engine renders numeric, categorical, and empty specs",
+      file.exists(tmp_png))
+unlink(tmp_png)
+
 cat("\nall plot-helper tests passed\n")

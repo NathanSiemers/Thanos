@@ -2,7 +2,7 @@
 title: "Thanos benchmark report"
 subtitle: "Interactive cross-filtering for R/Shiny — performance across scales, backends, and storage layouts"
 author: "Thanos project (github.com/NathanSiemers/Thanos)"
-date: "2026-08-05"
+date: "2026-08-05 (rev. 2: caching + plot-engine sections)"
 geometry: margin=2.5cm
 fontsize: 11pt
 colorlinks: true
@@ -29,6 +29,7 @@ Rscript bench/bench_masks.R      # the per-interaction data path
 Rscript bench/bench_backends.R   # in-memory vs SQLite column store
 Rscript bench/bench_big.R        # 38M rows: SQLite vs DuckDB aggregates
 Rscript bench/bench_layouts.R    # melt vs wide vs parquet-direct
+Rscript bench/bench_plots.R      # whole interaction incl. ALL plot renders
 ```
 
 Test machine: R 4.5.3, Linux, 28 cores, 377 GB RAM (rstudio
@@ -82,9 +83,10 @@ contrast with the pre-binned design.
   Pre-binning made each render 3.7× faster than the legacy full-data
   approach (920 ms), and decoupled render cost from row count
   entirely.
-- Future lever if many panels ever feel sluggish: a faster graphics
-  device (ragg) or a base-graphics `barplot` re-implementation of the
-  same visual. Not currently needed.
+- The "future lever" flagged when these numbers were first taken — a
+  base-graphics re-implementation of the same visual — has since been
+  built and measured; see section 6, where it wins by an order of
+  magnitude and becomes the default engine.
 - Not visible in the table but architecturally decisive: the old
   module *also* tore down and rebuilt every filter widget on every
   input (a `renderUI` dependency bug) and re-filtered the full data
@@ -243,6 +245,84 @@ Same interaction state as section 3.
   from the module entirely); the build even materializes the wide
   table already. A parquet-direct backend would additionally need
   row-ID materialization to support the parent-app row pointer.
+
+# 5. Backend caching (default ON)
+
+**What is measured.** The DB backends cache two things, both
+controlled by `cache = TRUE` (the default) on the backend
+constructors: fetched **columns** are kept for the backend's lifetime,
+and **aggregate query results** (binned counts, row counts, row masks)
+are memoised, bounded at `cache_max_entries = 256` with oldest-first
+eviction. Both caches assume the database is immutable while open
+(`clear_cache()` exists for when it isn't; `cache_stats()` reports
+hits/misses/entries/bytes). The redundant calls this eliminates:
+re-selecting a deselected column used to re-pay the full fetch; a
+parent app (the grapher) re-fetched its plotted columns from the DB on
+*every* filter change; and revisited filter states — a checkbox
+toggled off and back on — re-ran identical SQL.
+
+| operation | cold (first call) | warm (cached) |
+|---|---|---|
+| flights sqlite, get_column(dep_delay) | 213 ms | 0.0 ms |
+| taxi duckdb, get_binned_pair (2 filters) | 691 ms | 1.0 ms |
+| taxi duckdb, get_count (2 filters) | 406 ms | 0.0 ms |
+
+**Interpretation.**
+
+- After first touch, repeated data access costs nothing — the grapher's
+  per-interaction column reads and any toggle-back-and-forth filter
+  exploration become free.
+- Memory is the trade: a cached flights column is ~2.7 MB, but a
+  38M-row numeric column is ~300 MB, which is why the flag exists.
+  Aggregate mode never fetches columns, so `demo_big` stays lean
+  either way; the memo entries it does cache are just bin-count
+  vectors (tiny) plus any row masks a parent requests.
+- `cache = FALSE` reproduces the pre-caching behavior byte for byte
+  (verified by tests/test-cache.R against an uncached backend).
+
+# 6. Whole-interaction cost including ALL plot renders
+
+**What is measured.** Sections 1–5 timed pieces; this benchmark times
+the *user-visible whole*: one slider drag with the demo's 8 columns
+selected = recompute one mask + recombine the leave-one-out masks +
+re-render **all 8 histograms** to a raster device (what Shiny's
+`renderPlot` does per plot). Section 1 showed rendering dominates the
+pipeline, so this is also where optimization effort went. Two levers
+were tested (`bench/bench_plots.R`):
+
+- **device**: `ragg::agg_png` vs the stock `grDevices::png`
+  rasterizer, same ggplot code.
+- **engine**: the ggplot pipeline vs a new base-graphics twin
+  (`plot_histo_counts_base`) that draws the identical visual — stacked
+  sel/unsel bars in the same plasma pair, same count title, compact
+  axes — with `rect()`/`axis()` calls instead of
+  ggplot build → gtable layout → grid drawing.
+
+| engine | device | per interaction (8 plots) | per plot |
+|---|---|---|---|
+| ggplot | png | 2,244 ms | 280 ms |
+| ggplot | ragg | 2,235 ms | 279 ms |
+| base | png | 233 ms | 29 ms |
+| base | ragg | **190 ms** | **24 ms** |
+
+**Interpretation.**
+
+- **The engine, not the device, was the bottleneck.** ragg does
+  nothing for the ggplot path because ggplot's cost is object build +
+  gtable layout, not rasterization. Swapping the engine wins ~10×;
+  ragg then shaves a further ~20% off the base path.
+- A full 8-plot interaction drops from ~2.2 s to **~0.2 s** — the
+  whole interaction now costs less than one ggplot panel did. Combined
+  with debouncing, flights-scale filtering feels instantaneous.
+- The base engine is now the **default**
+  (`thanosServer(plot_engine = "base")`); `"ggplot"` remains one
+  argument away. Visual parity was checked side by side (same colors,
+  stacking, titles; base additionally thins categorical axis labels
+  above 30 levels, where neither engine could render them readably).
+- At taxi scale the same render savings apply on top of the SQL times
+  from section 3: with warm caches (section 5) and the base engine, a
+  revisited filter state re-renders 4 plots in well under 100 ms
+  total.
 
 # Overall guidance by scale
 

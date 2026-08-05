@@ -108,6 +108,60 @@ plot_histo_counts <- function(spec, shown, sel, n_shown, n_sel, var) {
     p + ggtitle(title) + scale_fill_thanos() + theme_thanos
 }
 
+## Base-graphics twin of plot_histo_counts: same visual (stacked
+## sel/unsel bars in the plasma pair, count title, compact axes) drawn
+## with rect()/axis() instead of ggplot -- an order of magnitude less
+## rendering overhead, for thanosServer(plot_engine = "base").
+plot_histo_counts_base <- function(spec, shown, sel, n_shown, n_sel, var) {
+    cols <- viridisLite::plasma(2, begin = 0, end = 0.4)  # sel, unsel
+    title <- paste(var, ":", format(n_sel, big.mark = ","),
+                   "/", format(n_shown, big.mark = ","))
+    op <- par(mar = c(2.2, 3.2, 1.6, 0.4), mgp = c(2, 0.6, 0), tcl = -0.3)
+    on.exit(par(op))
+    if (spec$nbins == 0 || sum(shown) == 0) {
+        plot.new()
+        title(main = title, adj = 0, cex.main = 1, font.main = 1)
+        return(invisible())
+    }
+    unsel <- shown - sel
+    if (spec$kind == "num") {
+        half <- spec$width / 2
+        xlim <- c(spec$mids[1] - half, spec$mids[spec$nbins] + half)
+        plot.new()
+        plot.window(xlim = xlim, ylim = c(0, max(shown)), xaxs = "i", yaxs = "i")
+        x0 <- spec$mids - half
+        x1 <- spec$mids + half
+        ## unselected on top of selected, exactly like the ggplot stack
+        rect(x0, 0, x1, sel, col = cols[1], border = NA)
+        rect(x0, sel, x1, shown, col = cols[2], border = NA)
+        axis(1, cex.axis = 1)
+        axis(2, cex.axis = 0.75, las = 1)
+    } else {
+        k <- spec$nbins
+        plot.new()
+        plot.window(xlim = c(0, k), ylim = c(0, max(shown)), xaxs = "i", yaxs = "i")
+        x0 <- seq_len(k) - 0.9
+        x1 <- seq_len(k) - 0.1
+        rect(x0, 0, x1, sel, col = cols[1], border = NA)
+        rect(x0, sel, x1, shown, col = cols[2], border = NA)
+        ## draw labels ourselves: axis() silently drops labels that would
+        ## overlap, ggplot's scale_x_discrete does not.  Above ~30 levels
+        ## no label set is readable, so thin to at most 30 evenly spaced
+        labs <- abbreviate(spec$labels, minlength = 4)
+        at <- seq_len(k) - 0.5
+        if (k > 30) {
+            keep <- seq(1, k, by = ceiling(k / 30))
+            labs <- labs[keep]
+            at <- at[keep]
+        }
+        cex_lab <- min(1, max(0.55, 18 / length(labs)))
+        mtext(labs, side = 1, at = at, line = 0.4, cex = cex_lab)
+        axis(2, cex.axis = 0.75, las = 1)
+    }
+    title(main = title, adj = 0, cex.main = 1, font.main = 1)
+    invisible()
+}
+
 ## The signature Thanos histogram: rows passing all OTHER filters ("loo",
 ## leave-one-out), stacked as this variable's own selected vs unselected.
 ##   bin  result of bin_column() for this variable

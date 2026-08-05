@@ -76,6 +76,12 @@ sees via `filters()`/`rows()` — stays in raw units. In aggregate mode
 the toggle appears only if the SQL engine has `log2()` (DuckDB yes,
 stock RSQLite no).
 
+**Plot engine**: histograms are drawn by a base-graphics renderer by
+default (`thanosServer(plot_engine = "base")`) — the identical visual
+at ~24 ms per plot instead of ggplot's ~280 ms, making a full 8-plot
+interaction ~10× faster (see `bench/bench_plots.R`). Pass
+`plot_engine = "ggplot"` to use the grid pipeline instead.
+
 **Reactive hygiene** (all handled inside the module, parent apps need
 nothing): slider inputs are debounced (`debounce_ms`, default 300 ms)
 and so are checkbox groups (`debounce_checkbox_ms`, default 300 ms —
