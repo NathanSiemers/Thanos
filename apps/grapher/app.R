@@ -104,6 +104,14 @@ backend <- backend_memory(as.data.frame(nycflights13::flights))
 ## that existed "before Thanos": column choices for the plot controls,
 ## a cap so geom_point stays responsive.
 PLOT_CAP <- 50000
+## session-constant sampling priorities: re-executions over the SAME
+## row set draw the SAME sample, so a content-neutral invalidation can
+## never jitter the plot or the fitted slope statistics; genuinely new
+## row sets still change the sample
+sample_prio <- runif(backend$n_rows())
+stable_sample <- function(r, cap = PLOT_CAP) {
+    if (length(r) <= cap) r else sort(r[head(order(sample_prio[r]), cap)])
+}
 numeric_cols <- Filter(function(cn) backend$get_column_info(cn)$is_numeric,
                        backend$get_columns())
 
@@ -206,9 +214,10 @@ server <- function(input, output, session) {
     ##   - add_vars() only ADDS, and is idempotent: nothing happens
     ##     if the columns are already selected.
     ##   - the user keeps full control: they can remove the panel
-    ##     again; it will only come back if the axis CHANGES (this
-    ##     observer fires on input$x/input$y changes, not on the
-    ##     module's own selection changes -- no tug-of-war loop).
+    ##     again; it only comes back when input$x or input$y next
+    ##     changes (either one re-fires this observer for both axes;
+    ##     it never fires on the module's own selection changes, so
+    ##     there is no tug-of-war loop).
     ##   - unknown column names are ignored, so it is safe to pass
     ##     UI state through directly.
     ############################################################
@@ -225,7 +234,7 @@ server <- function(input, output, session) {
     ############################################################
     plot_rows <- reactive({
         r <- th$rows()                              # <- the hand-off
-        if (length(r) > PLOT_CAP) sort(sample(r, PLOT_CAP)) else r
+        stable_sample(r)
     })
 
     ## INTERACTION, part 2: the parent fetches ITS OWN data for the
@@ -274,7 +283,7 @@ server <- function(input, output, session) {
         if (!isTRUE(input$show_excluded)) return(NULL)
         s <- th$streams(input$x, split_range = TRUE, drop_na = TRUE)
         fetch <- function(ids) {
-            if (length(ids) > PLOT_CAP) ids <- sort(sample(ids, PLOT_CAP))
+            ids <- stable_sample(ids)
             df <- data.frame(x = backend$get_column(input$x)[ids],
                              y = backend$get_column(input$y)[ids])
             df[complete.cases(df), , drop = FALSE]
@@ -295,7 +304,7 @@ server <- function(input, output, session) {
     ## facet; within a facet the first-named set is faded (low alpha)
     ## and the second emphasized.  With exactly two sets the single
     ## pair appears in both emphasis orders.
-    comparison <- reactive({
+    comparison_calc <- reactive({
         sets <- stream_sets()
         if (is.null(sets)) return(NULL)
         nm <- names(sets)
@@ -315,12 +324,33 @@ server <- function(input, output, session) {
                                         "excluded"))
         list(points = pts, pairs = prs, sets = sets)
     })
+    ## equality-gated: toggling compare with zero populations, or any
+    ## recomputation that lands on identical content (stable sampling
+    ## makes that common), re-renders nothing downstream
+    comparison <- local({
+        out <- reactiveVal(NULL)
+        observe({
+            cmp <- comparison_calc()
+            if (!identical(cmp, isolate(out()))) out(cmp)
+        })
+        out
+    })
 
     ## consistent population colors everywhere (plots AND stats text):
     ## selected keeps the plasma blue of its slope line; the reject
     ## streams get distinct plasma hues
     STREAM_COLS <- c(selected = "#0D0887", below = "#9C179E",
                      above = "#E16462", excluded = "#9C179E")
+
+    ## x/y-only frame for slope fitting: independent of the color/size
+    ## selections, so changing those never refits, and their NAs never
+    ## silently change the fitted n (the drawn line matches the stats)
+    xy_data <- reactive({
+        r <- plot_rows()
+        df <- data.frame(x = backend$get_column(input$x)[r],
+                         y = backend$get_column(input$y)[r])
+        df[complete.cases(df), , drop = FALSE]
+    })
 
     ## From here down: 100% ordinary grapher code.  It has no idea
     ## Thanos exists; it just renders whatever the reactives hold.
@@ -355,11 +385,12 @@ server <- function(input, output, session) {
         } else {
             geom_point(alpha = 0.4)
         }
-        if (isTRUE(input$fit_slopes) && nrow(df) >= 3) {
-            ## ONE line for the whole population (not per color group)
+        xy <- xy_data()
+        if (isTRUE(input$fit_slopes) && nrow(xy) >= 3) {
+            ## ONE line for the whole population (not per color group),
+            ## fit on the same x/y frame the stats report
             p <- p + geom_smooth(
-                data = df,
-                aes(x = .data[[input$x]], y = .data[[input$y]]),
+                data = xy, aes(x = x, y = y),
                 method = "lm", formula = y ~ x, se = FALSE,
                 colour = STREAM_COLS[["selected"]], linewidth = 1,
                 inherit.aes = FALSE)
@@ -415,8 +446,8 @@ server <- function(input, output, session) {
         req(input$x, input$y)
         cmp <- comparison()
         if (is.null(cmp)) {
-            df <- plot_data()
-            xs <- df[[input$x]]; ys <- df[[input$y]]
+            df <- xy_data()
+            xs <- df$x; ys <- df$y
             if (length(xs) < 3) return("too few selected points for a linear fit")
             cs <- summary(lm(ys ~ xs))$coefficients
             return(sprintf(paste0(

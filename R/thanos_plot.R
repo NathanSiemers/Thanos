@@ -80,14 +80,23 @@ bin_column <- function(x, bins = 50, discrete_values = NULL, range = NULL,
 ## passing this variable's own filter, and the row totals for the
 ## title.  The single tabulation point -- the module and plot_histo()
 ## both use it.
-bin_counts <- function(bin, loo, own) {
+bin_counts <- function(bin, loo, own = NULL) {
+    n_shown <- sum(loo)
+    if (is.null(own)) {
+        ## no own filter: the selected set IS the shown set
+        shown <- if (bin$nbins == 0) integer(0)
+                 else tabulate(bin$idx[loo], nbins = bin$nbins)
+        return(list(shown = shown, sel = shown,
+                    n_shown = n_shown, n_sel = n_shown))
+    }
+    both <- own & loo
     if (bin$nbins == 0) {
         return(list(shown = integer(0), sel = integer(0),
-                    n_shown = sum(loo), n_sel = sum(own & loo)))
+                    n_shown = n_shown, n_sel = sum(both)))
     }
     list(shown = tabulate(bin$idx[loo], nbins = bin$nbins),
-         sel   = tabulate(bin$idx[own & loo], nbins = bin$nbins),
-         n_shown = sum(loo), n_sel = sum(own & loo))
+         sel   = tabulate(bin$idx[both], nbins = bin$nbins),
+         n_shown = n_shown, n_sel = sum(both))
 }
 
 ## Render a histogram from pre-computed bin counts -- the one entry

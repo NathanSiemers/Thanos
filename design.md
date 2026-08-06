@@ -129,10 +129,43 @@ three rules:
 
 Consequences worth naming: the log2 toggle is display-local — it
 preserves the filter in raw units (the slider is repositioned onto the
-new scale, its echo recognized by prediction and suppressed), so it
+new scale, its echoes recognized by prediction and suppressed), so it
 re-renders exactly one plot at the cost of one aggregate query (zero
 in vector mode) — and a k-plot page only ever re-renders the plots
 whose content changed.
+
+### Audit addendum (2026-08-06)
+
+Three exhaustive measured audits (widget-input, structural, and
+parent-app flows; counting-observer probes + backend miss deltas)
+hardened the discipline further:
+
+- observers never self-trigger: compound `reactiveValues$x[[v]] <- val`
+  assignments READ the key they write, so every such write is wrapped
+  in `isolate()` — previously a systematic 2× per event;
+- no-op events cost O(1): each per-var observer short-circuits on
+  (raw value, include-NA, scale) identity before any O(n) work;
+- the loo/global-mask combiner exists only in vector mode (aggregate
+  mode never reads it), runs at raised priority so new plots never see
+  a half-updated flush, and treats all-pass as canonical NULL so the
+  no-filter state never flaps;
+- debounced input reactives are created once per column and reused
+  across remove/re-add (shiny::debounce internals are indestructible);
+  include-NA debounces like other checkboxes;
+- re-adding a column screens the observer's FIRST event against the
+  value the rebuilt widget is known to report — the stale ghost of the
+  previous incarnation is skipped exactly once (this fixed two real
+  bugs: a cleared filter transiently resurrecting, and a remembered
+  empty selection being clobbered).  `freezeReactiveValue` is
+  deliberately avoided: its thaw re-delivers the stale value, and it
+  wedges shiny::debounce and observeEvent(ignoreInit) primings;
+- `add_vars()` unions against the last REQUESTED selection, so a
+  parent calling it at startup cannot race (and clobber) the module's
+  own default_selected round trip;
+- parent apps sample with session-constant priorities
+  (`stable_sample` in the grapher): identical row sets yield identical
+  samples, so content-neutral invalidations can never jitter plots or
+  fitted statistics.
 
 Per-variable lifecycle state lives in **one object**
 (`cache$var[[v]]`: info, widget kind, bin, cached column, slider

@@ -44,7 +44,7 @@ server <- function(input, output, session) {
                 format(th$n_selected(), big.mark = ","),
                 format(backend$n_rows(), big.mark = ","))
     })
-    output$head <- renderTable(head(storms_df[th$rows(), ], 12))
+    output$head <- renderTable(storms_df[head(th$rows(), 12), ])
 }
 
 shinyApp(ui, server)

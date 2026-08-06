@@ -361,6 +361,8 @@ backend_dbi <- function(con,
         },
 
         get_count = function(filters) {
+          ## the no-filter state needs no query and no memo entry
+          if (length(filters) == 0) return(n)
           memo_get(memo_key("count", filters), function() {
             clauses <- filter_clauses(filters)
             if (length(clauses) == 0) return(n)
@@ -372,6 +374,7 @@ backend_dbi <- function(con,
         },
 
         get_row_mask = function(filters) {
+          if (length(filters) == 0) return(rep(TRUE, n))
           memo_get(memo_key("mask", filters), function() {
             clauses <- filter_clauses(filters)
             if (length(clauses) == 0) return(rep(TRUE, n))

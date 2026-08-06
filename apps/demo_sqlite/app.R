@@ -63,7 +63,7 @@ server <- function(input, output, session) {
                    "dep_delay", "arr_delay", "distance")
     show_df <- as.data.frame(lapply(setNames(show_cols, show_cols),
                                     backend$get_column))
-    output$head <- renderTable(head(show_df[th$rows(), ], 12))
+    output$head <- renderTable(show_df[head(th$rows(), 12), ])
 }
 
 shinyApp(ui, server)

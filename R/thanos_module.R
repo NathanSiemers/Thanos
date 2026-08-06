@@ -200,7 +200,10 @@ thanosServer <- function(id, backend,
         ## info, widget kind, bin spec, cached column (vector mode),
         ## slider bounds, observers, seen/can_log flags
         cache <- new.env(parent = emptyenv())
-        cache$var <- list()
+        cache$var <- list()   # one state object per selected variable
+        cache$deb <- list()   # debounced filter reactives, reused across
+                              # remove/re-add (their observers can't be
+                              # destroyed, so never re-create them)
 
         ## INVALIDATION DISCIPLINE (see design.md): every write below is
         ## equality-gated -- a value that did not change is never written,
@@ -227,9 +230,13 @@ thanosServer <- function(id, backend,
         })
 
         all_columns <- backend$get_columns()
+        ## the last selection we asked the client for (non-reactive):
+        ## add_vars() unions against this so it can never race the
+        ## still-round-tripping default_selected update
+        cache$requested <- intersect(default_selected %||% character(0),
+                                     all_columns)
         updateSelectizeInput(session, "vars", choices = all_columns,
-            selected = intersect(default_selected %||% character(0), all_columns),
-            server = TRUE)
+            selected = cache$requested, server = TRUE)
 
         ## column name -> id-safe fragment for input/output ids and selectors
         vid <- function(v) gsub("[^A-Za-z0-9_]", "_", v)
@@ -245,8 +252,9 @@ thanosServer <- function(id, backend,
             function(v) {
                 loo <- looStore[[v]]   # per-var gated: only content
                 req(!is.null(loo))     # changes invalidate this plot
-                own <- maskStore[[v]] %||% rep(TRUE, n_rows)
-                bin_counts(cache$var[[v]]$bin, loo, own)
+                ## an absent mask means "no own filter": bin_counts
+                ## short-circuits instead of AND-ing an all-TRUE vector
+                bin_counts(cache$var[[v]]$bin, loo, maskStore[[v]])
             }
         } else {
             function(v) {
@@ -307,13 +315,63 @@ thanosServer <- function(id, backend,
             stored_log <- can_log && isTRUE(isolate(logState[[v]]))
 
             st <- list(info = info, widget = widget, discrete = discrete,
-                       can_log = can_log, seen = FALSE,
+                       can_log = can_log,
+                       ## a remembered empty selection (character(0)) must
+                       ## survive re-add: the widget HAS spoken before, so
+                       ## its fresh NULL report means "none", not "no filter"
+                       seen = !is.null(stored),
                        log_active = stored_log,
+                       echoes = list(),
+                       last_applied = NULL,
                        col = if (mode == "vector") backend$get_column(v),
                        slider = if (widget == "slider")
                                     slider_bounds(info, log2p1 = stored_log))
             st$bin <- build_bin(st, stored_log)
             cache$var[[v]] <- st
+            if (mode == "vector") {
+                ## seed the leave-one-out entry: a new unfiltered column's
+                ## loo set IS the current global mask, so its first render
+                ## needn't wait for (or re-trigger) the combiner observer
+                looStore[[v]] <- isolate(globalMaskVal()) %||% rep(TRUE, n_rows)
+                ## a REMEMBERED filter applies immediately (the rebuilt
+                ## widget shows it): seed the mask rather than waiting
+                ## for the widget round trip the freeze below defers
+                if (!is.null(stored)) {
+                    m <- make_mask(st$col, stored, stored_na)
+                    if (!all(m)) maskStore[[v]] <- m
+                }
+            }
+
+            ## the session may still hold this input's value from a
+            ## PREVIOUS incarnation of the column (removed and re-added):
+            ## processing it would resurrect a filter that removal cleared,
+            ## and parents would see wrong rows() until the rebuilt widget
+            ## reports.  Defense: screen the observer's FIRST post-rebuild
+            ## event against the value the rebuilt widget is KNOWN to
+            ## report (st$expect): a match is processed, anything else is
+            ## the stale ghost and is skipped once.
+            ## (freezeReactiveValue is deliberately NOT used: its thaw
+            ## re-delivers the stale value anyway, and freezing an input
+            ## consumed through shiny::debounce wedges the debouncer so
+            ## later values never emit; freezing an observeEvent's
+            ## ignoreInit event expression swallows the first real event.)
+            readd <- !is.null(cache$deb[[v]])
+            if (readd) {
+                cache$var[[v]]$has_expect <- TRUE
+                cache$var[[v]]$expect <- if (widget == "slider") {
+                    d <- stored %||% c(st$slider$lo, st$slider$hi)
+                    fin <- is.finite(d)
+                    if (stored_log) d[fin] <- log2(d[fin] + 1)
+                    pmin(pmax(d, st$slider$lo), st$slider$hi)
+                } else if (widget == "selectize") {
+                    stored                     # NULL = empty selectize
+                } else {
+                    sel_set <- stored %||% info$levels
+                    if (length(sel_set) == 0) NULL   # checkbox: none ticked
+                    else sel_set
+                }
+                if (can_log) cache$var[[v]]$log_expect <- stored_log
+            }
 
             insertUI(paste0("#", ns("panels")), where = "beforeEnd",
                      immediate = TRUE,
@@ -327,13 +385,44 @@ thanosServer <- function(id, backend,
             ## include-NA input recomputes only THIS variable's mask.
             ## Sliders AND checkboxes are debounced: a lazy drag or a
             ## rapid run of clicks coalesces into one recomputation.
-            raw_filter <- reactive(input[[paste0("filter_", id)]])
-            db_ms <- if (widget == "slider") debounce_ms else debounce_checkbox_ms
-            filt <- if (db_ms > 0) debounce(raw_filter, db_ms) else raw_filter
+            ## The debounced reactive is created ONCE per column name and
+            ## reused across remove/re-add cycles: shiny::debounce's
+            ## internal observers cannot be destroyed, so re-creating one
+            ## per incarnation would leak observer chains.
+            if (is.null(cache$deb[[v]])) {
+                raw_filter <- reactive(input[[paste0("filter_", id)]])
+                db_ms <- if (widget == "slider") debounce_ms
+                         else debounce_checkbox_ms
+                cache$deb[[v]] <- if (db_ms > 0) debounce(raw_filter, db_ms)
+                                  else raw_filter
+                ## the include-NA checkbox debounces like other checkboxes
+                raw_na <- reactive(input[[paste0("na_", id)]])
+                cache$deb[[paste0(v, ".na")]] <-
+                    if (debounce_checkbox_ms > 0) {
+                        debounce(raw_na, debounce_checkbox_ms)
+                    } else raw_na
+            }
+            filt  <- cache$deb[[v]]
+            na_in <- cache$deb[[paste0(v, ".na")]]
             has_na <- info$n_na > 0
             obs_mask <- observe({
                 val <- filt()
-                keep_na <- if (has_na) (input[[paste0("na_", id)]] %||% TRUE) else TRUE
+                keep_na <- if (has_na) (na_in() %||% TRUE) else TRUE
+                st0 <- cache$var[[v]]
+                ## re-add screening (see add_var): first event must match
+                ## the rebuilt widget's known value; the stale ghost of a
+                ## previous incarnation is skipped exactly once
+                if (isTRUE(st0$has_expect)) {
+                    cache$var[[v]]$has_expect <- FALSE
+                    matches <- if (widget == "slider") {
+                        !is.null(val) && length(val) == 2 &&
+                            all(abs(val - st0$expect) <=
+                                    st0$slider$step / 2 + 1e-9)
+                    } else {
+                        identical(val, st0$expect)
+                    }
+                    if (!matches) return()
+                }
                 if (!is.null(val)) cache$var[[v]]$seen <- TRUE
                 ## a checkboxGroup with everything unchecked reports NULL;
                 ## once the widget has spoken, NULL means "none", not "no filter"
@@ -343,14 +432,25 @@ thanosServer <- function(id, backend,
                 }
                 if (!is.null(val) && widget == "slider") {
                     ## a log2 toggle repositions the slider to the SAME raw
-                    ## filter; that update echoes back here and must not be
-                    ## mistaken for user intent (echo = the value we
-                    ## predicted, within slider-step quantization)
-                    echo <- cache$var[[v]]$echo
-                    if (!is.null(echo)) {
-                        cache$var[[v]]$echo <- NULL
+                    ## filter; those updates echo back here and must not be
+                    ## mistaken for user intent.  Pending predictions are a
+                    ## LIST (rapid double-toggles queue two echoes); a
+                    ## value matching any pending echo (within slider-step
+                    ## quantization) is consumed silently, a non-match
+                    ## clears the queue and is processed as user input.
+                    echoes <- cache$var[[v]]$echoes
+                    if (length(echoes)) {
                         sb <- cache$var[[v]]$slider
-                        if (all(abs(val - echo) <= sb$step / 2 + 1e-9)) return()
+                        hit <- vapply(echoes, function(e) {
+                            length(e) == length(val) &&
+                                all(abs(val - e) <= sb$step / 2 + 1e-9)
+                        }, NA)
+                        if (any(hit)) {
+                            cache$var[[v]]$echoes <-
+                                echoes[-seq_len(max(which(hit)))]
+                            return()
+                        }
+                        cache$var[[v]]$echoes <- list()
                     }
                     ## a slider handle AT an endpoint means "unbounded on
                     ## that side": the visible range is outlier-robust
@@ -370,22 +470,32 @@ thanosServer <- function(id, backend,
                         val <- ifelse(is.finite(val), 2^val - 1, val)
                     }
                 }
-                ## equality-gated writes: unchanged values propagate nothing
+                ## short-circuit anything already applied: no-op re-sends
+                ## and the self-echo run cost O(1), not an O(n) make_mask
+                applied <- list(val, keep_na)
+                if (identical(applied, cache$var[[v]]$last_applied)) return()
+                cache$var[[v]]$last_applied <- applied
+                ## equality-gated writes: unchanged values propagate
+                ## nothing.  The compound sub-assignments below are
+                ## wrapped in isolate() because `x$f[[v]] <- val` desugars
+                ## to a READ of x$f then a write -- and an unisolated read
+                ## here would make this observer depend on the very key it
+                ## writes, re-running it once per interaction.
                 if (mode == "vector") {
                     new_mask <- make_mask(cache$var[[v]]$col, val, keep_na)
                     old_mask <- isolate(maskStore[[v]])
                     ## an absent entry already means "all pass" downstream
                     if (!(is.null(old_mask) && all(new_mask)) &&
                         !identical(new_mask, old_mask)) {
-                        maskStore[[v]] <- new_mask
+                        isolate(maskStore[[v]] <- new_mask)
                     }
                 }
                 if (!identical(val, isolate(filterState$filters[[v]]))) {
-                    filterState$filters[[v]] <- val
+                    isolate(filterState$filters[[v]] <- val)
                 }
                 if (!identical(keep_na,
                                isolate(filterState$includeNA[[v]]) %||% TRUE)) {
-                    filterState$includeNA[[v]] <- keep_na
+                    isolate(filterState$includeNA[[v]] <- keep_na)
                 }
             })
             obs_list <- list(obs_mask)
@@ -398,6 +508,15 @@ thanosServer <- function(id, backend,
                 ## (with one query in aggregate mode, none in vector mode)
                 obs_log <- observeEvent(input[[paste0("log_", id)]], {
                     use_log <- isTRUE(input[[paste0("log_", id)]])
+                    ## re-add screening (see add_var): the first event on a
+                    ## rebuilt column must match the rebuilt checkbox --
+                    ## anything else is the previous incarnation's stale
+                    ## value and is skipped once
+                    lx <- cache$var[[v]]$log_expect
+                    if (!is.null(lx)) {
+                        cache$var[[v]]$log_expect <- NULL
+                        if (!identical(use_log, isTRUE(lx))) return()
+                    }
                     if (identical(isTRUE(cache$var[[v]]$log_active), use_log)) {
                         return()   # no scale change (e.g. widget re-report)
                     }
@@ -407,14 +526,22 @@ thanosServer <- function(id, backend,
                     sb <- slider_bounds(info, log2p1 = use_log)
                     cache$var[[v]]$slider <- sb
                     ## show the CURRENT raw filter at its position on the
-                    ## new scale (endpoints stand for +/-Inf as usual)
+                    ## new scale (endpoints stand for +/-Inf as usual;
+                    ## infinite bounds skip the transform rather than
+                    ## producing NaN warnings)
                     raw <- isolate(filterState$filters[[v]])
                     disp <- if (is.null(raw)) c(sb$lo, sb$hi) else {
-                        d <- if (use_log) log2(raw + 1) else raw
+                        d <- raw
+                        if (use_log) {
+                            f <- is.finite(raw)
+                            d[f] <- log2(raw[f] + 1)
+                        }
                         c(if (is.finite(d[1])) max(d[1], sb$lo) else sb$lo,
                           if (is.finite(d[2])) min(d[2], sb$hi) else sb$hi)
                     }
-                    cache$var[[v]]$echo <- disp  # our own update: suppress it
+                    ## queue our own update's echo for suppression
+                    cache$var[[v]]$echoes <-
+                        c(cache$var[[v]]$echoes, list(disp))
                     updateSliderInput(session, paste0("filter_", id),
                                       min = sb$lo, max = sb$hi,
                                       value = disp, step = sb$step)
@@ -470,7 +597,7 @@ thanosServer <- function(id, backend,
             for (o in cache$var[[v]]$obs) o$destroy()
             cache$var[[v]] <- NULL
             maskStore[[v]] <- NULL
-            looStore[[v]]  <- NULL
+            if (mode == "vector") looStore[[v]] <- NULL
             ## deselecting a column removes its filtering COMPLETELY --
             ## no ghost filters (Project.md note).  With remember_removed
             ## = TRUE the settings are kept and restored on re-add; the
@@ -488,6 +615,7 @@ thanosServer <- function(id, backend,
             old_vars <- varsNow()
             for (v in setdiff(old_vars, new_vars)) remove_var(v)
             for (v in setdiff(new_vars, old_vars)) add_var(v)
+            cache$requested <- new_vars   # the user's word is final
             if (!identical(new_vars, old_vars)) varsNow(new_vars)
         })
 
@@ -500,9 +628,16 @@ thanosServer <- function(id, backend,
         ## whose content changed -- untouched plots are not even
         ## pulsed, and rows()/mask() stay bit-stable for parent apps
         ## (so e.g. the grapher's sampled scatter is not re-drawn).
-        looStore <- reactiveValues()       # var -> loo mask
-        globalMaskVal <- reactiveVal(NULL) # AND of all masks
-        observe({
+        looStore <- reactiveValues()       # var -> loo mask (vector mode)
+        globalMaskVal <- reactiveVal(NULL) # AND of all masks; NULL is the
+                                           # canonical "all pass" so the
+                                           # no-filters state never flaps
+                                           # between NULL and rep(TRUE, n)
+        ## the combiner exists only in vector mode (aggregate mode derives
+        ## everything from filtersNow and would waste O(k*n) allocations),
+        ## and runs at raised priority so plots never see a half-updated
+        ## flush (no cancelled first renders, no phantom frames)
+        if (mode == "vector") observe(priority = 10, x = {
             vs <- varsNow()
             k <- length(vs)
             if (k == 0) {
@@ -529,8 +664,10 @@ thanosServer <- function(id, backend,
                     looStore[[vs[i]]] <- loo
                 }
             }
-            if (!identical(prefix[[k]], isolate(globalMaskVal()))) {
-                globalMaskVal(prefix[[k]])
+            g <- prefix[[k]]
+            if (all(g)) g <- NULL   # canonical all-pass
+            if (!identical(g, isolate(globalMaskVal()))) {
+                globalMaskVal(g)
             }
         })
 
@@ -543,7 +680,7 @@ thanosServer <- function(id, backend,
         ## reports, adding an unfiltered column, slider echoes) invalidate
         ## none of the plots reading it
         filtersNow <- reactiveVal(list())
-        observe({
+        observe(priority = 10, x = {
             vs <- varsNow()
             fs <- filterState$filters
             na <- filterState$includeNA
@@ -574,9 +711,16 @@ thanosServer <- function(id, backend,
             rows          = reactive(which(globalMask())),
             n_selected    = nSelected,
             selected_vars = reactive(varsNow()),
-            filters       = reactive({
-                fs <- filterState$filters
-                fs[intersect(names(fs), varsNow())]
+            ## equality-gated like filtersNow, so structural changes with
+            ## unchanged filter content don't re-run parent consumers
+            filters       = local({
+                out <- reactiveVal(list())
+                observe(priority = 10, x = {
+                    fs <- filterState$filters
+                    now <- fs[intersect(names(fs), varsNow())]
+                    if (!identical(now, isolate(out()))) out(now)
+                })
+                out
             }),
             ## Leave-one-out row streams for one column: partition the
             ## rows passing every OTHER filter by what this column's own
@@ -596,12 +740,14 @@ thanosServer <- function(id, backend,
                         looStore[[v]] %||% rep(TRUE, n_rows)
                     } else globalMask()
                     x <- if (!is.null(st)) st$col else backend$get_column(v)
-                    val <- if (!is.null(st)) filterState$filters[[v]]
-                    keep_na <- if (!is.null(st)) {
-                        filterState$includeNA[[v]] %||% TRUE
-                    } else TRUE
-                    return(stream_partition(x, val, keep_na, universe,
-                                            split_range, drop_na))
+                    ## v's own filter from the NORMALIZED, equality-gated
+                    ## store (like the aggregate path) -- reading the raw
+                    ## filterState here would subscribe the caller to
+                    ## every no-op widget report of every column
+                    own <- filtersNow()[[v]]
+                    return(stream_partition(x, own$val,
+                                            own$include_na %||% TRUE,
+                                            universe, split_range, drop_na))
                 }
                 ## aggregate mode: composed from the existing memoised
                 ## mask queries -- no new SQL.  Strict below/above come
@@ -652,11 +798,18 @@ thanosServer <- function(id, backend,
             ## add_var path and the user can still remove them by hand.
             add_vars      = function(cols) {
                 cols <- intersect(cols, all_columns)
-                want <- union(isolate(varsNow()), cols)
-                if (!setequal(want, isolate(varsNow()))) {
-                    updateSelectizeInput(session, "vars",
-                                         choices = all_columns,
-                                         selected = want, server = TRUE)
+                ## union against the last REQUESTED selection, not the
+                ## reactive varsNow(): at startup the default_selected
+                ## update is still round-tripping and varsNow() is empty,
+                ## so a parent's early add_vars() (e.g. the grapher's
+                ## axis bridge firing on init) must not clobber it
+                want <- union(cache$requested, cols)
+                if (!setequal(want, cache$requested)) {
+                    cache$requested <- want
+                    ## selected only: choices were registered at init and
+                    ## never change (a full choices re-send would reload
+                    ## the widget client-side)
+                    updateSelectizeInput(session, "vars", selected = want)
                 }
                 invisible(want)
             }

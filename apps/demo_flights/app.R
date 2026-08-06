@@ -47,10 +47,10 @@ server <- function(input, output, session) {
                 format(backend$n_rows(), big.mark = ","))
     })
     output$head <- renderTable({
-        head(flights_df[th$rows(),
-                        c("year", "month", "day", "carrier", "flight",
-                          "origin", "dest", "dep_delay", "arr_delay",
-                          "distance")], 12)
+        flights_df[head(th$rows(), 12),
+                   c("year", "month", "day", "carrier", "flight",
+                     "origin", "dest", "dep_delay", "arr_delay",
+                     "distance")]
     })
 }
 

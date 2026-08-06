@@ -219,4 +219,55 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
           runs == r0 + 1)
 })
 
+## audit regression: a remembered EMPTY selection survives remove/re-add
+## (the fresh widget's NULL report must not clobber character(0))
+testServer(thanosServer,
+           args = list(backend = backend, debounce_ms = 0,
+                       debounce_checkbox_ms = 0, max_discrete_numeric = 0,
+                       remember_removed = TRUE), {
+    session$setInputs(vars = "cat")
+    session$setInputs(filter_cat = "y")          # widget has spoken
+    session$setInputs(filter_cat = NULL)         # uncheck all = none
+    check("empty selection selects nothing", session$returned$n_selected() == 0)
+    session$setInputs(vars = character(0))
+    session$setInputs(vars = "cat")
+    check("remembered empty selection survives re-add",
+          session$returned$n_selected() == 0 &&
+          identical(session$returned$filters()$cat, character(0)))
+})
+
+## audit regression: re-adding a FORGOTTEN column must not resurrect its
+## old filter from the session's stale input value (parents saw wrong
+## rows() during that window before the input-freeze fix)
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     max_discrete_numeric = 0), {
+    session$setInputs(vars = "num")
+    session$setInputs(filter_num = c(2, 4))
+    check("filter active", session$returned$n_selected() == 4)
+    session$setInputs(vars = character(0))
+    session$setInputs(vars = "num")   # stale filter_num = c(2,4) persists
+    check("re-add does NOT resurrect the forgotten filter",
+          session$returned$n_selected() == 6 &&
+          is.null(session$returned$filters()$num))
+})
+
+## audit regression: obs_mask runs ONCE per event (the compound
+## filterState assignments used to re-trigger it), measured by counting
+## O(n) mask computations through a wrapped make_mask
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     max_discrete_numeric = 0), {
+    session$setInputs(vars = "num")
+    calls <- 0
+    orig <- make_mask
+    make_mask <<- function(...) { calls <<- calls + 1; orig(...) }
+    on.exit(make_mask <<- orig, add = TRUE)
+    session$setInputs(filter_num = c(2, 4))
+    check("one filter change = exactly one mask computation", calls == 1)
+    session$setInputs(filter_num = c(2, 4))      # identical re-send
+    check("identical re-send computes no mask at all", calls == 1)
+    make_mask <<- orig
+})
+
 cat("\nall module tests passed\n")
