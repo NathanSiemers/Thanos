@@ -104,6 +104,19 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
           length(session$returned$selected_vars()) == 0)
 })
 
+## start-up: this module's vars observer runs once before the widget has
+## reported anything (input$vars is NULL).  That run must not be taken
+## as "the user selected nothing" -- a parent's start-up add_vars() has
+## to union with default_selected, not replace it.
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     default_selected = "a"), {
+    session$flushReact()
+    want <- session$getReturned()$add_vars("g")
+    check("start-up add_vars() keeps default_selected",
+          setequal(want, c("a", "g")))
+})
+
 ## the REAL grapher app server, end to end: shadow shinyApp so sourcing
 ## app.R hands back its server function, then drive a scenario where
 ## the x filter rejects on BOTH sides -> three populations -> three

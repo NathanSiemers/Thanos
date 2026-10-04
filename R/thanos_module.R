@@ -651,6 +651,16 @@ thanosServer <- function(id, backend,
             ## whitelist: selectize choices are not enforced by Shiny, so
             ## a client-invented name must never reach the backend
             new_vars <- intersect(input$vars %||% character(0), all_columns)
+            ## until the widget has reported a selection once, an empty
+            ## value is just the uninitialised input (this observer's
+            ## start-up run), not the user's word: it must not overwrite
+            ## the selection still on its way to the client
+            ## (default_selected), or a parent's start-up add_vars()
+            ## would union against nothing and drop the defaults
+            if (!isTRUE(cache$vars_live)) {
+                if (length(new_vars) == 0) return()
+                cache$vars_live <- TRUE
+            }
             ## add_vars() re-sends the server-side selectize; the client
             ## clears it, then re-selects after an ajax round trip.  That
             ## ONE transient empty report must not tear down every panel

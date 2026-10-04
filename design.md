@@ -210,6 +210,13 @@ a global environment full of its own helpers:
   widget while it reloads; the vars observer swallows that single
   transient empty report (at most one, so a genuine clear-all is never
   lost) instead of tearing down every panel and filter.
+- until the column picker has reported a selection once, an empty
+  `input$vars` is the uninitialised input, not the user's word. The
+  vars observer's start-up run used to record it as the "last requested
+  selection", so a parent calling `add_vars()` at start-up unioned
+  against nothing: with a selected-only update the parent's columns
+  were lost, with a full re-send `default_selected` was. Found by
+  driving the grapher in a real browser (`tests/browser-grapher.R`).
 - `input$vars` is intersected with the backend's columns: selectize
   choices are not enforced by Shiny, so a client-invented name must
   never reach `backend$get_column()`.
