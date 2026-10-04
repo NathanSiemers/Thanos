@@ -25,7 +25,10 @@ it, and the redundancies that pass removed. It is the reference for
    histogram count is produced by one function per mode.
 4. **The parent app's interface is reactives out, one function in.**
    Out: `mask/rows/n_selected/selected_vars/filters`. In:
-   `add_vars()`. Nothing else crosses the boundary.
+   `add_vars()`. Nothing else crosses the boundary — with one
+   declarative exception, `base_mask` (0.3.0): a reactive the parent
+   hands over at construction, describing the *universe* of rows (see
+   "Parent-imposed universe" below).
 5. **Elegance = deletion.** When two code paths drift toward each
    other (as the vector and aggregate render paths did), merge them
    behind the smallest abstraction that fits — here, "a counts
@@ -47,6 +50,7 @@ R/thanos_backend.R        the contract + backend_memory
 R/thanos_backend_sqlite.R backend_dbi (SQL generation, aggregation,
    │                      caching) + sqlite/duckdb wrappers
 R/thanos_theme.R  visual identity (compact theme, plasma pair)
+R/thanos_utils.R  namespace-owned %||% and the injective id encoder
 thanos.R (repo root)  loader: private namespace, public API only
                   (the no-install alternative to the installed package)
 ```
@@ -171,6 +175,52 @@ Per-variable lifecycle state lives in **one object**
 (`cache$var[[v]]`: info, widget kind, bin, cached column, slider
 bounds, observers, flags), created whole by `add_var()` and deleted
 whole by `remove_var()` — not in parallel per-field lists.
+
+### Parent-imposed universe: `base_mask` (0.3.0)
+
+A host app often has selectors of its own that decide *which rows
+exist* (in T2: cohort, tumor-only) and wants Thanos to fine-tune inside
+that set. Filtering the parent's data after the fact would leave every
+histogram and count describing rows the plot will never show.
+
+`thanosServer(base_mask = <reactive>)` closes that gap with one extra
+mask: `NULL` (all rows) or `logical(n_rows)`. The combiner ANDs it into
+every leave-one-out mask and into the global mask — the same two places
+a filter column's mask goes — so it behaves exactly like a filter with
+no panel: histograms, `n_sel / n_shown`, `mask()`, `rows()`,
+`n_selected()` and `streams()` all describe the universe, and changing
+it never touches the user's filter settings. It is canonicalised
+(`NA` → `FALSE`, all-`TRUE` → `NULL`) before use, so "no restriction"
+has one representation and the existing equality gates keep it from
+invalidating anything. Vector mode only (aggregate mode refuses it at
+construction rather than ignore it). Widget metadata — slider range,
+checkbox levels, the `include NA (n)` label — still describes the whole
+column: it comes from the backend, which does not know the universe.
+
+### Host-proofing addendum (0.3.0)
+
+Found while embedding Thanos in an app with 135k selectable columns and
+a global environment full of its own helpers:
+
+- `add_vars()` re-sends **choices + selected through the server-side
+  selectize path**. A selected-only update is dropped by the client for
+  any value whose option is not loaded, and a server-side selectize
+  loads only the first page of options — so on a large column set the
+  call silently did nothing. The re-send makes the client clear the
+  widget while it reloads; the vars observer swallows that single
+  transient empty report (at most one, so a genuine clear-all is never
+  lost) instead of tearing down every panel and filter.
+- `input$vars` is intersected with the backend's columns: selectize
+  choices are not enforced by Shiny, so a client-invented name must
+  never reach `backend$get_column()`.
+- `%||%` is defined inside the namespace (`thanos_utils.R`). In source
+  mode the namespace's parent is `globalenv()`, so a host's own `%||%`
+  with different semantics would otherwise replace base R's inside the
+  module.
+- ids are built by an injective encoder (`thanos_vid`): id-safe names
+  map to themselves, every other byte becomes `-HH`. The previous
+  "replace with `_`" scheme gave `TP53.mut` and `TP53_mut` one shared
+  input id.
 
 ## SQL generation (backend_dbi)
 

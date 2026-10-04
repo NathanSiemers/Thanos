@@ -204,3 +204,19 @@ One optional call flows the other way: `th$add_vars(cols)` asks Thanos
 to include columns in its filter selection (additive, idempotent) —
 the grapher uses it to keep its plotted axes filterable, so their NAs
 and ranges are always user-controllable.
+
+**A parent-imposed universe.** If your app has selectors of its own
+that decide which rows exist at all (a cohort picker, a "tumor samples
+only" checkbox), pass them as `base_mask` — a reactive returning `NULL`
+(all rows) or a `logical(n_rows)`:
+
+```r
+th <- thanosServer("thanos", backend,
+                   base_mask = reactive(my_data_frame$cohort %in% input$cohort))
+```
+
+Thanos then behaves as if only those rows existed: every histogram and
+count, `rows()`, `mask()`, `n_selected()` and `streams()` are restricted
+to the universe, it updates live when the reactive changes, and the
+user's filter settings are untouched by the change. It is a filter with
+no panel. Keep it a pure reactive (no `req()` inside); vector mode only.

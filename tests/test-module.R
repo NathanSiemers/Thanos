@@ -270,4 +270,138 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
     make_mask <<- orig
 })
 
+## ---------------------------------------------------------------
+## base_mask: a parent-imposed universe.  It is ANDed into every
+## leave-one-out mask and the global mask, so histograms, counts,
+## mask()/rows() and streams() all see only the parent's rows.
+## ---------------------------------------------------------------
+bm <- reactiveVal(NULL)
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     max_discrete_numeric = 0,
+                                     base_mask = bm), {
+    session$flushReact()
+    check("base_mask NULL, no vars: everything passes",
+          all(session$returned$mask()) && session$returned$n_selected() == 6)
+
+    ## no filter columns at all: the universe alone decides
+    base <- c(TRUE, TRUE, TRUE, TRUE, FALSE, FALSE)
+    bm(base); session$flushReact()
+    check("no vars: mask() is exactly the base mask",
+          identical(session$returned$mask(), base))
+    check("no vars: rows()/n_selected() follow the base mask",
+          identical(session$returned$rows(), 1:4) &&
+          session$returned$n_selected() == 4)
+
+    ## unfiltered columns change nothing, and their histograms count
+    ## only the universe
+    session$setInputs(vars = c("num", "cat"))
+    check("unfiltered columns: mask still equals the base mask",
+          identical(session$returned$mask(), base))
+    ct <- isolate(counts_for("cat"))
+    check("histogram of an unfiltered column counts only the universe",
+          ct$n_shown == 4 && ct$n_sel == 4 && identical(sum(ct$shown), 4L))
+
+    ## an active filter combines with the universe (row 6 is NA in num:
+    ## kept by include-NA, removed by the base mask)
+    session$setInputs(filter_num = c(2, 4))
+    check("filter AND base mask", identical(session$returned$rows(), 2:4))
+    ct <- isolate(counts_for("cat"))
+    check("another column's leave-one-out set respects the base mask",
+          ct$n_shown == 3 && identical(as.integer(ct$shown), c(1L, 2L, 0L)))
+    ct <- isolate(counts_for("num"))
+    check("own histogram: shown = universe, selected = universe & filter",
+          ct$n_shown == 4 && ct$n_sel == 3)
+    st <- isolate(session$returned$streams("num"))
+    check("streams() never leaks rows outside the universe",
+          identical(st$selected, 2:4) && identical(st$excluded, 1L))
+
+    ## the universe is reactive: changing it re-filters without touching
+    ## the user's filter settings
+    bm(c(FALSE, TRUE, TRUE, FALSE, TRUE, TRUE)); session$flushReact()
+    check("changing the base mask re-filters, filter settings kept",
+          identical(session$returned$rows(), c(2L, 3L, 6L)) &&
+          identical(isolate(session$returned$filters())$num, c(2, 4)))
+
+    ## NA in the base mask means "not in the universe"
+    bm(c(NA, TRUE, TRUE, TRUE, TRUE, TRUE)); session$flushReact()
+    check("NA in base mask counts as FALSE",
+          identical(session$returned$rows(), c(2L, 3L, 4L, 6L)))
+
+    ## an empty universe
+    bm(rep(FALSE, 6)); session$flushReact()
+    check("all-FALSE base mask selects nothing",
+          session$returned$n_selected() == 0 &&
+          length(session$returned$rows()) == 0)
+
+    ## removing every column leaves exactly the universe
+    bm(base); session$flushReact()
+    session$setInputs(vars = character(0))
+    check("removing all columns returns the mask to the base mask",
+          identical(session$returned$mask(), base))
+
+    ## parsimony: NULL and all-TRUE are the SAME universe -- switching
+    ## between them must not re-run consumers of rows()
+    bm(NULL); session$flushReact()
+    runs <- 0
+    observe({ session$returned$rows(); runs <<- runs + 1 })
+    session$flushReact()
+    r0 <- runs
+    bm(rep(TRUE, 6)); session$flushReact()
+    bm(NULL); session$flushReact()
+    check("NULL <-> all-TRUE base mask invalidates nothing", runs == r0)
+
+    ## a malformed mask is a loud error, not a silent mis-filter
+    bm(c(TRUE, FALSE))
+    bad <- tryCatch({ isolate(base_now()); FALSE }, error = function(e) TRUE)
+    bm(NULL)
+    check("wrong-length base mask is rejected", bad)
+})
+check("non-function base_mask is rejected at server start",
+      tryCatch({
+          testServer(thanosServer,
+                     args = list(backend = backend,
+                                 base_mask = c(TRUE, FALSE)), { NULL })
+          FALSE
+      }, error = function(e) grepl("base_mask", conditionMessage(e))))
+
+## ---------------------------------------------------------------
+## ids: column names that differ only in punctuation must get
+## DIFFERENT input ids (a lossy "replace with _" scheme collided),
+## while names that are already id-safe keep their name as the id
+## ---------------------------------------------------------------
+check("id-safe names map to themselves",
+      identical(thanos_vid("dep_delay"), "dep_delay") &&
+      identical(thanos_vid("num"), "num"))
+check("punctuation variants get distinct ids",
+      length(unique(vapply(c("a.b", "a_b", "a-b", "a b", "a..b"),
+                           thanos_vid, ""))) == 5 &&
+      thanos_vid("HLA-A") != thanos_vid("HLA.A"))
+check("ids contain only selector-safe characters",
+      !grepl("[^A-Za-z0-9_-]", thanos_vid("TP53.mut / x:y (z)")))
+df_ids <- data.frame(c(1, 2, 3, 4), c(10, 20, 30, 40), check.names = FALSE)
+names(df_ids) <- c("a.b", "a_b")
+testServer(thanosServer, args = list(backend = backend_memory(df_ids),
+                                     debounce_ms = 0, debounce_checkbox_ms = 0,
+                                     max_discrete_numeric = 0), {
+    session$setInputs(vars = c("a.b", "a_b"))
+    args <- stats::setNames(list(c(2, 4)), paste0("filter_", thanos_vid("a.b")))
+    do.call(session$setInputs, args)
+    check("filtering 'a.b' does not touch 'a_b'",
+          identical(session$returned$rows(), 2:4) &&
+          identical(names(isolate(session$returned$filters())), "a.b"))
+    session$setInputs(filter_a_b = c(10, 30))
+    check("'a.b' and 'a_b' filter independently",
+          identical(session$returned$rows(), 2:3))
+})
+
+## the column picker is whitelisted against the backend's columns
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0), {
+    session$setInputs(vars = c("num", "no_such_column"))
+    check("unknown names in the column picker are ignored",
+          identical(session$returned$selected_vars(), "num"))
+})
+
+
 cat("\nall module tests passed\n")

@@ -18,7 +18,8 @@ thanosServer(
   remember_removed = FALSE,
   removal_note = TRUE,
   max_discrete_numeric = 12,
-  plot_engine = c("base", "ggplot")
+  plot_engine = c("base", "ggplot"),
+  base_mask = NULL
 )
 }
 \arguments{
@@ -64,6 +65,18 @@ membership semantics) instead of getting a range slider.}
 
 \item{plot_engine}{\code{"base"} (default; identical visual at a fraction
 of the rendering cost) or \code{"ggplot"}.}
+
+\item{base_mask}{Optional parent-imposed universe: a reactive (or
+any function) returning \code{NULL} (all rows) or a \code{logical(n_rows)}
+vector, \code{TRUE} = the row exists as far as the module is concerned
+(\code{NA} counts as \code{FALSE}). It is ANDed into every histogram's
+leave-one-out set and into \code{mask()}/\code{rows()}/\code{n_selected()}/
+\code{streams()}, and re-evaluated reactively, so a host app can
+pre-filter (e.g. by a selector that lives outside the module)
+without a filter panel. Must be a pure reactive: do not call
+\code{req()} inside it. Widget metadata (slider ranges, checkbox
+levels, the "include NA (n)" label) still describes the whole
+column. Vector mode only.}
 }
 \value{
 A list of accessors for the parent app:
