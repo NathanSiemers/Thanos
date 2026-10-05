@@ -100,6 +100,14 @@ sees via `filters()`/`rows()` — stays in raw units. In aggregate mode
 the toggle appears only if the SQL engine has `log2()` (DuckDB yes,
 stock RSQLite no).
 
+**Category labels never collide.** Bar-chart labels are laid out from
+the real geometry of the plot (the width one bar gets vs. the measured
+width of each label): full labels side by side when they fit, else
+abbreviated; when the bars are too dense, rotated (60° if slanted lines
+clear each other, else vertical); denser still, the font shrinks to the
+size at which lines just clear; and past the smallest readable size only
+every n-th bar is labelled.
+
 **Plot engine**: histograms are drawn by a base-graphics renderer by
 default (`thanosServer(plot_engine = "base")`) — the identical visual
 at ~24 ms per plot instead of ggplot's ~280 ms, making a full 8-plot
