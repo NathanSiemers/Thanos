@@ -19,7 +19,8 @@ thanosServer(
   removal_note = TRUE,
   max_discrete_numeric = 12,
   plot_engine = c("base", "ggplot"),
-  base_mask = NULL
+  base_mask = NULL,
+  max_vars = 30
 )
 }
 \arguments{
@@ -65,6 +66,14 @@ membership semantics) instead of getting a range slider.}
 
 \item{plot_engine}{\code{"base"} (default; identical visual at a fraction
 of the rendering cost) or \code{"ggplot"}.}
+
+\item{max_vars}{Most columns that can be open (have a panel) at once,
+default 30; \code{NULL} or \code{Inf} for no limit. The limit is enforced on the
+server for the column picker and for \code{add_vars()}: every open column is a
+fetch from the backend plus a plot, and the picker's value comes from the
+browser, so without a limit one message could open thousands of columns
+and occupy the R process. Columns beyond the limit are not opened and the
+user is told.}
 
 \item{base_mask}{Optional parent-imposed universe: a reactive (or
 any function) returning \code{NULL} (all rows) or a \code{logical(n_rows)}

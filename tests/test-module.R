@@ -403,5 +403,29 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
           identical(session$returned$selected_vars(), "num"))
 })
 
+## max_vars: the number of open columns is limited on the server, whatever the
+## browser sends and whatever a parent asks for
+many <- as.data.frame(matrix(runif(40 * 12), 40, 12)); names(many) <- paste0("v", 1:12)
+testServer(thanosServer, args = list(backend = backend_memory(many), debounce_ms = 0,
+                                     debounce_checkbox_ms = 0, max_vars = 3), {
+    session$setInputs(vars = paste0("v", 1:12))
+    check("the column picker opens at most max_vars columns",
+          identical(session$returned$selected_vars(), paste0("v", 1:3)))
+    session$setInputs(filter_v2 = c(0.25, 0.75))
+    session$setInputs(vars = c("v9", "v2", "v10", "v11", "v12"))
+    check("columns already open are kept when too many are asked for",
+          "v2" %in% session$returned$selected_vars() && length(session$returned$selected_vars()) == 3 &&
+          identical(names(isolate(session$returned$filters())), "v2"))
+    before <- session$returned$selected_vars()
+    session$returned$add_vars(paste0("v", 4:8))
+    check("add_vars() cannot exceed the limit either",
+          identical(session$returned$selected_vars(), before))
+})
+testServer(thanosServer, args = list(backend = backend_memory(many), debounce_ms = 0,
+                                     debounce_checkbox_ms = 0, max_vars = NULL), {
+    session$setInputs(vars = paste0("v", 1:12))
+    check("max_vars = NULL means no limit", length(session$returned$selected_vars()) == 12)
+})
+
 
 cat("\nall module tests passed\n")

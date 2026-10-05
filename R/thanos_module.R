@@ -122,6 +122,13 @@ thanosUI <- function(id, width = "100%") {
 #'   membership semantics) instead of getting a range slider.
 #' @param plot_engine `"base"` (default; identical visual at a fraction
 #'   of the rendering cost) or `"ggplot"`.
+#' @param max_vars Most columns that can be open (have a panel) at once,
+#'   default 30; `NULL` or `Inf` for no limit. The limit is enforced on the
+#'   server for the column picker and for `add_vars()`: every open column is a
+#'   fetch from the backend plus a plot, and the picker's value comes from the
+#'   browser, so without a limit one message could open thousands of columns
+#'   and occupy the R process. Columns beyond the limit are not opened and the
+#'   user is told.
 #' @param base_mask Optional parent-imposed universe: a reactive (or
 #'   any function) returning `NULL` (all rows) or a `logical(n_rows)`
 #'   vector, `TRUE` = the row exists as far as the module is concerned
@@ -188,7 +195,10 @@ thanosServer <- function(id, backend,
                          removal_note = TRUE,
                          max_discrete_numeric = 12,
                          plot_engine = c("base", "ggplot"),
-                         base_mask = NULL) {
+                         base_mask = NULL,
+                         max_vars = 30) {
+    if (is.null(max_vars)) max_vars <- Inf
+    stopifnot(is.numeric(max_vars), length(max_vars) == 1, !is.na(max_vars), max_vars >= 1)
     ## "base" draws the identical visual with base graphics at a fraction
     ## of ggplot's per-render overhead (see bench/bench_plots.R);
     ## "ggplot" remains available if a host app needs grid graphics
@@ -651,6 +661,23 @@ thanosServer <- function(id, backend,
             ## whitelist: selectize choices are not enforced by Shiny, so
             ## a client-invented name must never reach the backend
             new_vars <- intersect(input$vars %||% character(0), all_columns)
+            ## at most max_vars columns open: keep the ones already open, add in
+            ## the order asked, drop the rest and put the picker back in step
+            if (length(new_vars) > max_vars) {
+                kept <- utils::head(c(intersect(varsNow(), new_vars), setdiff(new_vars, varsNow())), max_vars)
+                new_vars <- new_vars[new_vars %in% kept]
+                try(showNotification(sprintf("At most %d filter variables can be open at once; the others were not added.", max_vars),
+                                     type = "warning", session = session), silent = TRUE)
+                cache$requested <- new_vars
+                cache$resync <- "armed"
+                updateSelectizeInput(session, "vars", choices = all_columns, selected = new_vars, server = TRUE)
+                cache$vars_live <- TRUE
+                old_vars <- varsNow()
+                for (v in setdiff(old_vars, new_vars)) remove_var(v)
+                for (v in setdiff(new_vars, old_vars)) add_var(v)
+                if (!identical(new_vars, old_vars)) varsNow(new_vars)
+                return()
+            }
             ## until the widget has reported a selection once, an empty
             ## value is just the uninitialised input (this observer's
             ## start-up run), not the user's word: it must not overwrite
@@ -870,6 +897,11 @@ thanosServer <- function(id, backend,
                 ## so a parent's early add_vars() (e.g. the grapher's
                 ## axis bridge firing on init) must not clobber it
                 want <- union(cache$requested, cols)
+                if (length(want) > max_vars) {       # what is open stays; new ones only up to the limit
+                    want <- utils::head(want, max_vars)
+                    try(showNotification(sprintf("At most %d filter variables can be open at once; the others were not added.", max_vars),
+                                         type = "warning", session = session), silent = TRUE)
+                }
                 if (!setequal(want, cache$requested)) {
                     cache$requested <- want
                     ## choices + selected, server-side: a selected-only
