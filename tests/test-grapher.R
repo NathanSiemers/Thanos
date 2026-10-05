@@ -71,6 +71,52 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
           setequal(session$getReturned()$add_vars("g"), c("a", "g")))
 })
 
+## add_vars() re-sends the server-side selectize (so columns outside
+## the first loaded page of options can be selected at all); the client
+## clears the widget while it reloads.  That ONE transient empty report
+## must not tear down the existing panels and their filters.
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0), {
+    session$setInputs(vars = "a")
+    session$setInputs(filter_a = c(25, 75))
+    kept <- session$returned$rows()
+    session$getReturned()$add_vars("g")
+    session$setInputs(vars = character(0))      # client clears on reload
+    check("transient empty report after add_vars keeps panels + filters",
+          identical(session$returned$selected_vars(), "a") &&
+          identical(session$returned$rows(), kept))
+    session$setInputs(vars = c("a", "g"))       # then re-selects
+    check("the reloaded selection adds the new column, filters intact",
+          setequal(session$returned$selected_vars(), c("a", "g")) &&
+          identical(session$returned$rows(), kept))
+    session$setInputs(vars = character(0))      # a GENUINE clear-all
+    check("a genuine clear-all afterwards is honoured",
+          length(session$returned$selected_vars()) == 0 &&
+          session$returned$n_selected() == nrow(df))
+})
+## ...and no report can be swallowed when nothing was selected before
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0), {
+    session$getReturned()$add_vars("g")
+    session$setInputs(vars = "g")
+    session$setInputs(vars = character(0))
+    check("clear-all right after an add_vars round trip is honoured",
+          length(session$returned$selected_vars()) == 0)
+})
+
+## start-up: this module's vars observer runs once before the widget has
+## reported anything (input$vars is NULL).  That run must not be taken
+## as "the user selected nothing" -- a parent's start-up add_vars() has
+## to union with default_selected, not replace it.
+testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
+                                     debounce_checkbox_ms = 0,
+                                     default_selected = "a"), {
+    session$flushReact()
+    want <- session$getReturned()$add_vars("g")
+    check("start-up add_vars() keeps default_selected",
+          setequal(want, c("a", "g")))
+})
+
 ## the REAL grapher app server, end to end: shadow shinyApp so sourcing
 ## app.R hands back its server function, then drive a scenario where
 ## the x filter rejects on BOTH sides -> three populations -> three

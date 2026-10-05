@@ -110,4 +110,65 @@ check("base engine renders numeric, categorical, and empty specs",
       file.exists(tmp_png))
 unlink(tmp_png)
 
+## ---- category label layout: labels must never run into each other ----
+## a fixed-pitch "device": every character is 0.1in wide, a line 0.15in
+w_of <- function(l, cex) nchar(l) * 0.1 * cex
+lay <- function(labels, slot, max_depth = 0.7) {
+    cat_label_layout(labels, slot = slot, width_of = w_of, line_h = 0.15,
+                     max_depth = max_depth)
+}
+fits <- function(L, slot) {        # no two drawn labels can collide
+    step <- if (length(L$keep) > 1) diff(L$keep)[1] else 1
+    if (L$angle == 0) max(w_of(L$labels[L$keep], L$cex)) <= slot * step
+    else 0.15 * L$cex <= slot * step * sin(L$angle * pi / 180) + 1e-9
+}
+few <- c("breast", "colon", "lung", "pancreas", "skin")
+L <- lay(few, slot = 1)
+check("roomy bars: full labels, horizontal, full size",
+      L$angle == 0 && L$cex == 1 && identical(L$labels, few) &&
+      identical(L$keep, 1:5))
+long <- c("Additional - New Primary", "Metastatic", "Primary Tumor",
+          "Solid Tissue Normal")
+L <- lay(long, slot = 0.9)
+check("long labels that fit abbreviated stay horizontal",
+      L$angle == 0 && all(nchar(L$labels) <= 9) && fits(L, 0.9))
+codes <- sprintf("C%03d", 1:34)                    # 34 cohort-like codes
+L <- lay(codes, slot = 0.16)
+check("dense bars: labels are rotated, all kept, none collide",
+      L$angle %in% c(60, 90) && length(L$keep) == 34 && fits(L, 0.16))
+L60 <- lay(codes, slot = 0.25)
+check("moderately dense: a 60-degree slant when slanted lines clear",
+      L60$angle == 60 && L60$cex == 1 && fits(L60, 0.25))
+L <- lay(sprintf("C%03d", 1:80), slot = 0.10)
+check("very dense: vertical with a font shrunk to just clear",
+      L$angle == 90 && L$cex < 1 && L$cex >= 0.5 && length(L$keep) == 80 &&
+      fits(L, 0.10))
+L <- lay(sprintf("C%03d", 1:400), slot = 0.02)
+check("extreme: font floor reached, only every n-th bar labelled",
+      L$angle == 90 && L$cex == 0.5 && length(L$keep) < 400 &&
+      L$keep[1] == 1 && fits(L, 0.02))
+wordy <- sprintf("a rather long category name number %d", 1:40)
+L <- lay(wordy, slot = 0.16, max_depth = 0.6)
+check("rotated labels respect the depth budget (abbreviate, then shrink)",
+      L$angle == 90 && L$depth <= 0.6 + 1e-9 && L$cex >= 0.5 &&
+      !anyDuplicated(L$labels) && fits(L, 0.16))
+L <- lay(wordy, slot = 0.16, max_depth = 0.2)
+check("...and are cut as a last resort, never overflowing",
+      L$depth <= 0.2 + 1e-9 && L$cex == 0.5 && all(nchar(L$labels) >= 1))
+check("no labels at all is handled",
+      length(lay(character(0), slot = 1)$keep) == 0)
+
+## both engines draw dense and extreme category sets without error
+tmp_png <- tempfile(fileext = ".png")
+png(tmp_png, width = 400, height = 150)
+for (k in c(34, 126, 400)) {
+    sp <- list(kind = "cat", labels = sprintf("level-%03d", seq_len(k)), nbins = k)
+    plot_histo_counts_base(sp, rep(3L, k), rep(1L, k), 3 * k, k, "dense")
+    stopifnot(inherits(plot_histo_counts(sp, rep(3L, k), rep(1L, k), 3 * k, k,
+                                         "dense"), "ggplot"))
+}
+dev.off()
+unlink(tmp_png)
+check("dense category histograms render in both engines", TRUE)
+
 cat("\nall plot-helper tests passed\n")

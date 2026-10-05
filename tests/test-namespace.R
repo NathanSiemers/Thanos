@@ -22,6 +22,9 @@ check <- function(label, expr) {
 make_mask     <- function(...) stop("host make_mask called by Thanos!")
 display_range <- function(...) stop("host display_range called by Thanos!")
 host_mask     <- make_mask
+## ...and its own %||% with DIFFERENT semantics (a common host-app
+## helper): the module must keep using its own null-default
+`%||%` <- function(a, b) stop("host %||% called by Thanos!")
 
 root <- Filter(function(p) file.exists(file.path(p, "thanos.R")),
                c(".", ".."))[1]
@@ -64,5 +67,9 @@ testServer(thanosServer, args = list(backend = backend, debounce_ms = 0,
     check("module filters correctly despite host-side name collisions",
           identical(session$returned$rows(), 3:4))
 })
+
+check("thanos owns its %||% (host definition cannot leak in)",
+      identical(environment(thanos$`%||%`), thanos) &&
+      identical(thanos$`%||%`(character(0), "x"), character(0)))
 
 cat("\nall namespace tests passed\n")

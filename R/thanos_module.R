@@ -122,6 +122,17 @@ thanosUI <- function(id, width = "100%") {
 #'   membership semantics) instead of getting a range slider.
 #' @param plot_engine `"base"` (default; identical visual at a fraction
 #'   of the rendering cost) or `"ggplot"`.
+#' @param base_mask Optional parent-imposed universe: a reactive (or
+#'   any function) returning `NULL` (all rows) or a `logical(n_rows)`
+#'   vector, `TRUE` = the row exists as far as the module is concerned
+#'   (`NA` counts as `FALSE`). It is ANDed into every histogram's
+#'   leave-one-out set and into `mask()`/`rows()`/`n_selected()`/
+#'   `streams()`, and re-evaluated reactively, so a host app can
+#'   pre-filter (e.g. by a selector that lives outside the module)
+#'   without a filter panel. Must be a pure reactive: do not call
+#'   `req()` inside it. Widget metadata (slider ranges, checkbox
+#'   levels, the "include NA (n)" label) still describes the whole
+#'   column. Vector mode only.
 #'
 #' @return A list of accessors for the parent app:
 #'   \describe{
@@ -176,7 +187,8 @@ thanosServer <- function(id, backend,
                          remember_removed = FALSE,
                          removal_note = TRUE,
                          max_discrete_numeric = 12,
-                         plot_engine = c("base", "ggplot")) {
+                         plot_engine = c("base", "ggplot"),
+                         base_mask = NULL) {
     ## "base" draws the identical visual with base graphics at a fraction
     ## of ggplot's per-render overhead (see bench/bench_plots.R);
     ## "ggplot" remains available if a host app needs grid graphics
@@ -194,6 +206,30 @@ thanosServer <- function(id, backend,
         }
         if (mode == "aggregate" && !isTRUE(backend$supports_binned)) {
             stop("this backend does not support aggregate mode")
+        }
+
+        ## parent-imposed universe: base_mask() restricts which rows
+        ## exist as far as this module is concerned.  It is ANDed into
+        ## every leave-one-out mask and the global mask by the combiner
+        ## below, so histograms, counts, mask()/rows() and streams() all
+        ## see only the parent's universe -- without a filter panel.
+        if (!is.null(base_mask) && !is.function(base_mask)) {
+            stop("base_mask must be NULL or a reactive/function")
+        }
+        if (!is.null(base_mask) && mode == "aggregate") {
+            stop("base_mask is only supported in vector mode")
+        }
+        ## canonical form: NULL == "all rows" (like globalMaskVal), so an
+        ## absent mask and an all-TRUE one never flap downstream
+        base_now <- function() {
+            if (is.null(base_mask)) return(NULL)
+            b <- base_mask()
+            if (is.null(b)) return(NULL)
+            if (!is.logical(b) || length(b) != n_rows) {
+                stop("base_mask() must return NULL or logical(n_rows)")
+            }
+            b[is.na(b)] <- FALSE
+            if (all(b)) NULL else b
         }
 
         ## one non-reactive state object per selected variable:
@@ -238,8 +274,9 @@ thanosServer <- function(id, backend,
         updateSelectizeInput(session, "vars", choices = all_columns,
             selected = cache$requested, server = TRUE)
 
-        ## column name -> id-safe fragment for input/output ids and selectors
-        vid <- function(v) gsub("[^A-Za-z0-9_]", "_", v)
+        ## column name -> id-safe fragment for input/output ids and
+        ## selectors (injective: see thanos_vid in thanos_utils.R)
+        vid <- thanos_vid
 
         plot_label <- function(v) {
             if (isTRUE(logState[[v]])) paste0(v, " (log2+1)") else v
@@ -611,7 +648,31 @@ thanosServer <- function(id, backend,
         }
 
         observeEvent(input$vars, ignoreNULL = FALSE, {
-            new_vars <- input$vars %||% character(0)
+            ## whitelist: selectize choices are not enforced by Shiny, so
+            ## a client-invented name must never reach the backend
+            new_vars <- intersect(input$vars %||% character(0), all_columns)
+            ## until the widget has reported a selection once, an empty
+            ## value is just the uninitialised input (this observer's
+            ## start-up run), not the user's word: it must not overwrite
+            ## the selection still on its way to the client
+            ## (default_selected), or a parent's start-up add_vars()
+            ## would union against nothing and drop the defaults
+            if (!isTRUE(cache$vars_live)) {
+                if (length(new_vars) == 0) return()
+                cache$vars_live <- TRUE
+            }
+            ## add_vars() re-sends the server-side selectize; the client
+            ## clears it, then re-selects after an ajax round trip.  That
+            ## ONE transient empty report must not tear down every panel
+            ## (and with it every filter).  At most one is swallowed, so
+            ## a genuine "remove everything" can never be lost.
+            if (identical(cache$resync, "armed")) {
+                if (length(new_vars) == 0 && length(varsNow()) > 0) {
+                    cache$resync <- "swallowed"
+                    return()
+                }
+            }
+            cache$resync <- NULL
             old_vars <- varsNow()
             for (v in setdiff(old_vars, new_vars)) remove_var(v)
             for (v in setdiff(new_vars, old_vars)) add_var(v)
@@ -640,8 +701,11 @@ thanosServer <- function(id, backend,
         if (mode == "vector") observe(priority = 10, x = {
             vs <- varsNow()
             k <- length(vs)
+            base <- base_now()   # parent's universe; NULL == all rows
             if (k == 0) {
-                if (!is.null(isolate(globalMaskVal()))) globalMaskVal(NULL)
+                if (!identical(base, isolate(globalMaskVal()))) {
+                    globalMaskVal(base)
+                }
                 return()
             }
             ms <- lapply(vs, function(v) maskStore[[v]] %||% rep(TRUE, n_rows))
@@ -660,11 +724,13 @@ thanosServer <- function(id, backend,
                        else if (is.null(left)) right
                        else if (is.null(right)) left
                        else left & right
+                if (!is.null(base)) loo <- loo & base
                 if (!identical(loo, isolate(looStore[[vs[i]]]))) {
                     looStore[[vs[i]]] <- loo
                 }
             }
             g <- prefix[[k]]
+            if (!is.null(base)) g <- g & base
             if (all(g)) g <- NULL   # canonical all-pass
             if (!identical(g, isolate(globalMaskVal()))) {
                 globalMaskVal(g)
@@ -806,10 +872,19 @@ thanosServer <- function(id, backend,
                 want <- union(cache$requested, cols)
                 if (!setequal(want, cache$requested)) {
                     cache$requested <- want
-                    ## selected only: choices were registered at init and
-                    ## never change (a full choices re-send would reload
-                    ## the widget client-side)
-                    updateSelectizeInput(session, "vars", selected = want)
+                    ## choices + selected, server-side: a selected-only
+                    ## update is DROPPED by the client for any value
+                    ## whose option is not loaded, and a server-side
+                    ## selectize only ever loads the first page of
+                    ## options -- so on a large column set (100k+ names)
+                    ## add_vars() would silently do nothing.  Re-sending
+                    ## through the server-side path ships the selected
+                    ## options with the first page.  The client clears
+                    ## the widget while it reloads; the vars observer
+                    ## swallows that one transient empty report.
+                    cache$resync <- "armed"
+                    updateSelectizeInput(session, "vars", choices = all_columns,
+                                         selected = want, server = TRUE)
                 }
                 invisible(want)
             }

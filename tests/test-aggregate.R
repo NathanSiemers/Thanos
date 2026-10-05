@@ -147,6 +147,16 @@ testServer(thanosServer,
           all(session$returned$mask()))
 })
 
+## base_mask is a vector-mode feature: aggregate mode must refuse it
+## loudly rather than silently ignore the parent's universe
+check("base_mask + aggregate mode is refused",
+      tryCatch({
+          testServer(thanosServer,
+                     args = list(backend = be, mode = "aggregate",
+                                 base_mask = function() NULL), { NULL })
+          FALSE
+      }, error = function(e) grepl("vector mode", conditionMessage(e))))
+
 ## log2(x+1) SQL binning: RSQLite lacks log2(), so this path is verified
 ## against DuckDB over the same tall/skinny fixture
 check("sqlite backend reports missing log2 support",

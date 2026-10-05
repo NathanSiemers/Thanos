@@ -130,11 +130,94 @@ plot_histo_counts <- function(spec, shown, sel, n_shown, n_sel, var,
     } else {
         df <- data.frame(pos = factor(rep(spec$labels, 2), levels = spec$labels),
                          count = c(sel, shown - sel), fill = fills)
+        ## a ggplot object does not know its device yet, so the label
+        ## layout is decided for a nominal panel (5in wide, 2in tall, 12pt
+        ## text ~ 0.6 em per character) -- same rules as the base engine
+        font_in <- 12 / 72
+        lay <- cat_label_layout(
+            spec$labels, slot = 5 / spec$nbins,
+            width_of = function(l, cex) nchar(l) * 0.6 * font_in * cex,
+            line_h = font_in * 0.9, max_depth = 0.7)
         p <- ggplot(df, aes(pos, count, fill = fill)) +
             geom_col() +
-            scale_x_discrete(labels = abbreviate)
+            scale_x_discrete(breaks = spec$labels[lay$keep],
+                             labels = lay$labels[lay$keep])
+        return(p + ggtitle(title) + scale_fill_thanos() + theme_thanos +
+               theme(axis.text.x = element_text(
+                   size = 12 * lay$cex, angle = lay$angle,
+                   hjust = if (lay$angle == 0) 0.5 else 1,
+                   vjust = if (lay$angle == 90) 0.5 else 1)))
     }
     p + ggtitle(title) + scale_fill_thanos() + theme_thanos
+}
+
+## How to label k equal-width bars so the labels never run into each
+## other -- pure geometry, shared by both plot engines.
+##   labels     the full category labels, one per bar
+##   slot       width available to one bar's label (inches)
+##   width_of   function(labels, cex) -> each label's width in inches
+##   line_h     room one line of text needs at cex 1 (inches)
+##   max_depth  how far rotated labels may reach below the axis (inches)
+##   min_cex    smallest font scale considered readable
+## Strategy, in order of preference:
+##   1. horizontal: full labels, else abbreviated, side by side (the
+##      shortest abbreviations may shrink to 75% to stay horizontal)
+##   2. rotated: 60 degrees when adjacent slanted lines clear each
+##      other, else vertical (the tightest packing)
+##   3. still too dense: shrink the font to the size at which lines just
+##      clear each other
+##   4. below min_cex nothing is readable: keep that size and label only
+##      every n-th bar
+## Rotated labels are abbreviated only as far as max_depth demands.
+## Returns list(labels, keep = which bars get a label, angle = 0/60/90,
+##              cex, depth = inches the labels need below the axis).
+cat_label_layout <- function(labels, slot, width_of, line_h, max_depth,
+                             min_cex = 0.5) {
+    k <- length(labels)
+    abbr <- function(n) {
+        if (is.finite(n)) abbreviate(labels, minlength = n, named = FALSE)
+        else labels
+    }
+    widest <- function(l, cex) if (length(l)) max(width_of(l, cex)) else 0
+    room <- slot * 0.92          # leave a sliver between neighbours
+    for (n in c(Inf, 8, 4)) {
+        labs <- abbr(n)
+        if (widest(labs, 1) <= room) {
+            return(list(labels = labs, keep = seq_len(k), angle = 0,
+                        cex = 1, depth = line_h))
+        }
+    }
+    ## nearly fits: a slightly smaller font keeps short abbreviations
+    ## horizontal, which costs the bars no height at all
+    w4 <- widest(labs, 1)
+    if (w4 * 0.75 <= room) {
+        return(list(labels = labs, keep = seq_len(k), angle = 0,
+                    cex = room / w4, depth = line_h))
+    }
+    ## rotated: adjacent baselines are slot * sin(angle) apart
+    angle <- if (slot * sin(pi / 3) >= line_h) 60 else 90
+    s <- sin(angle * pi / 180)
+    cex <- min(1, slot * s / line_h)
+    step <- 1
+    if (cex < min_cex) {
+        cex <- min_cex
+        step <- ceiling(line_h * min_cex / (slot * s))
+    }
+    for (n in c(Inf, 16, 12, 8, 6, 4)) {
+        labs <- abbr(n)
+        if (widest(labs, cex) * s <= max_depth) break
+    }
+    ## abbreviations stay unique, so they can still be too long: shrink
+    ## the font towards min_cex, and only then cut the text itself
+    depth <- widest(labs, cex) * s
+    if (depth > max_depth) {
+        cex <- max(min_cex, cex * max_depth / depth)
+        while (widest(labs, cex) * s > max_depth && max(nchar(labs)) > 1) {
+            labs <- substr(labs, 1, max(nchar(labs)) - 1)
+        }
+    }
+    list(labels = labs, keep = seq(1, k, by = step), angle = angle,
+         cex = cex, depth = widest(labs, cex) * s)
 }
 
 ## Base-graphics twin of plot_histo_counts: same visual (stacked
@@ -145,7 +228,8 @@ plot_histo_counts_base <- function(spec, shown, sel, n_shown, n_sel, var) {
     cols <- viridisLite::plasma(2, begin = 0, end = 0.4)  # sel, unsel
     title <- paste(var, ":", format(n_sel, big.mark = ","),
                    "/", format(n_shown, big.mark = ","))
-    op <- par(mar = c(2.2, 3.2, 1.6, 0.4), mgp = c(2, 0.6, 0), tcl = -0.3)
+    op <- par(mar = c(2.2, 3.2, 1.6, 0.4), mgp = c(2, 0.6, 0), tcl = -0.3,
+              xpd = FALSE)
     on.exit(par(op))
     if (spec$nbins == 0 || sum(shown) == 0) {
         plot.new()
@@ -167,24 +251,39 @@ plot_histo_counts_base <- function(spec, shown, sel, n_shown, n_sel, var) {
         axis(2, cex.axis = 0.75, las = 1)
     } else {
         k <- spec$nbins
+        ## draw labels ourselves (axis() silently drops labels that would
+        ## overlap), laid out from the REAL geometry of this device: the
+        ## width one bar gets, and the measured width of each label.
+        ## Dense bars get rotated labels, then a smaller font, then only
+        ## every n-th label (see cat_label_layout).
+        pad <- 0.06                                   # axis-to-label gap, in
+        lay <- cat_label_layout(
+            spec$labels, slot = par("pin")[1] / k,
+            width_of = function(l, cex) strwidth(l, units = "inches", cex = cex),
+            line_h = strheight("M", units = "inches", cex = 1) * 1.25,
+            max_depth = par("fin")[2] * 0.33)
+        if (lay$angle != 0) {
+            ## rotated labels need a deeper bottom margin than one line
+            mai <- par("mai")
+            mai[1] <- max(mai[1], lay$depth + 2 * pad)
+            par(mai = mai)
+        }
         plot.new()
         plot.window(xlim = c(0, k), ylim = c(0, max(shown)), xaxs = "i", yaxs = "i")
         x0 <- seq_len(k) - 0.9
         x1 <- seq_len(k) - 0.1
         rect(x0, 0, x1, sel, col = cols[1], border = NA)
         rect(x0, sel, x1, shown, col = cols[2], border = NA)
-        ## draw labels ourselves: axis() silently drops labels that would
-        ## overlap, ggplot's scale_x_discrete does not.  Above ~30 levels
-        ## no label set is readable, so thin to at most 30 evenly spaced
-        labs <- abbreviate(spec$labels, minlength = 4)
-        at <- seq_len(k) - 0.5
-        if (k > 30) {
-            keep <- seq(1, k, by = ceiling(k / 30))
-            labs <- labs[keep]
-            at <- at[keep]
+        at <- (seq_len(k) - 0.5)[lay$keep]
+        labs <- lay$labels[lay$keep]
+        if (lay$angle == 0) {
+            mtext(labs, side = 1, at = at, line = 0.4, cex = lay$cex)
+        } else {
+            ## anchored at the axis, reading up towards their bar
+            text(at, -pad * diff(par("usr")[3:4]) / par("pin")[2], labs,
+                 srt = lay$angle, cex = lay$cex, xpd = NA,
+                 adj = if (lay$angle == 90) c(1, 0.5) else c(1, 1))
         }
-        cex_lab <- min(1, max(0.55, 18 / length(labs)))
-        mtext(labs, side = 1, at = at, line = 0.4, cex = cex_lab)
         axis(2, cex.axis = 0.75, las = 1)
     }
     title(main = title, adj = 0, cex.main = 1, font.main = 1)
