@@ -37,6 +37,42 @@
 ##   - per-variable lifecycle state is one object (cache$var[[v]]),
 ##     created whole by add_var() and deleted whole by remove_var()
 ################################################################
+## ---- internal input validators (not exported) ---------------------
+## A Shiny input comes from the client and can hold ANY type/length/value.
+## These return a sanitised value, or NULL ("malformed: ignore") -- for
+## every value the UI itself produces they return the input unchanged.
+
+## range slider: finite numeric length 2, lo <= hi, clamped to [lo, hi]
+thanos_valid_range <- function(val, lo, hi) {
+    if (!is.numeric(val) || length(val) != 2L || anyNA(val) ||
+        any(!is.finite(val)) || val[1] > val[2]) return(NULL)
+    if (any(val < lo | val > hi)) val <- pmin(pmax(val, lo), hi)
+    val
+}
+## flag: a single non-NA logical, else the default
+thanos_valid_flag <- function(x, default = TRUE) {
+    if (is.logical(x) && length(x) == 1L && !is.na(x)) x else default
+}
+## selected levels: character (or NULL), dropped to the real levels;
+## NULL result for a wrong type.  character(0) is a valid "none".
+thanos_valid_levels <- function(val, levels) {
+    if (is.null(val)) return(NULL)
+    if (!is.character(val)) return(NA)          # NA = malformed
+    if (all(val %in% levels) && !anyDuplicated(val)) return(val)
+    unique(val[val %in% levels])
+}
+## run an observer body; an unexpected error is logged, not propagated
+## (which would end the user's session).  Shiny's silent req()/validate
+## conditions pass through untouched.
+thanos_guard <- function(label, expr) {
+    tryCatch(expr, error = function(e) {
+        if (inherits(e, "shiny.silent.error")) stop(e)
+        message("thanos: ", label, " ignored malformed input: ",
+                conditionMessage(e))
+        invisible(NULL)
+    })
+}
+
 #' Thanos cross-filter module UI
 #'
 #' Places the module's user interface: a column picker plus an anchor
@@ -452,9 +488,19 @@ thanosServer <- function(id, backend,
             filt  <- cache$deb[[v]]
             na_in <- cache$deb[[paste0(v, ".na")]]
             has_na <- info$n_na > 0
-            obs_mask <- observe({
+            obs_mask <- observe(thanos_guard("filter", {
                 val <- filt()
-                keep_na <- if (has_na) (na_in() %||% TRUE) else TRUE
+                keep_na <- if (has_na) thanos_valid_flag(na_in() %||% TRUE) else TRUE
+                ## malformed client values: ignored (last valid state kept)
+                if (!is.null(val)) {
+                    if (widget == "slider") {
+                        val <- thanos_valid_range(val, -Inf, Inf)
+                    } else {
+                        val <- thanos_valid_levels(val, info$levels)
+                    }
+                    if (is.null(val) || (length(val) == 1L && is.na(val) &&
+                                         widget != "slider")) return()
+                }
                 st0 <- cache$var[[v]]
                 ## re-add screening (see add_var): first event must match
                 ## the rebuilt widget's known value; the stale ghost of a
@@ -504,6 +550,10 @@ thanosServer <- function(id, backend,
                     ## (quantile bounds), so endpoints must not silently
                     ## drop the tails
                     sb <- cache$var[[v]]$slider
+                    ## (clamping to the domain first changes nothing for
+                    ## in-range values and is equivalent for the rest:
+                    ## beyond an endpoint already means unbounded)
+                    val <- thanos_valid_range(val, sb$lo, sb$hi)
                     if (val[1] <= sb$lo + sb$step / 2) val[1] <- -Inf
                     if (val[2] >= sb$hi - sb$step / 2) val[2] <- Inf
                     ## with the log2 transform active the slider lives in
@@ -544,7 +594,7 @@ thanosServer <- function(id, backend,
                                isolate(filterState$includeNA[[v]]) %||% TRUE)) {
                     isolate(filterState$includeNA[[v]] <- keep_na)
                 }
-            })
+            }))
             obs_list <- list(obs_mask)
 
             if (can_log) {
@@ -553,7 +603,7 @@ thanosServer <- function(id, backend,
                 ## but the filter KEEPS its raw-unit value -- so no other
                 ## plot's inputs change and exactly ONE plot re-renders
                 ## (with one query in aggregate mode, none in vector mode)
-                obs_log <- observeEvent(input[[paste0("log_", id)]], {
+                obs_log <- observeEvent(input[[paste0("log_", id)]], thanos_guard("log toggle", {
                     use_log <- isTRUE(input[[paste0("log_", id)]])
                     ## re-add screening (see add_var): the first event on a
                     ## rebuilt column must match the rebuilt checkbox --
@@ -592,17 +642,18 @@ thanosServer <- function(id, backend,
                     updateSliderInput(session, paste0("filter_", id),
                                       min = sb$lo, max = sb$hi,
                                       value = disp, step = sb$step)
-                }, ignoreInit = TRUE)
+                }), ignoreInit = TRUE)
                 obs_list <- c(obs_list, list(obs_log))
             }
 
             if (widget == "checkbox") {
-                obs_an <- observeEvent(input[[paste0("allnone_", id)]], {
+                obs_an <- observeEvent(input[[paste0("allnone_", id)]], thanos_guard("all/none", {
                     cur <- input[[paste0("filter_", id)]] %||% character(0)
+                    if (!is.character(cur)) cur <- character(0)
                     new_sel <- if (setequal(cur, info$levels)) character(0) else info$levels
                     updateCheckboxGroupInput(session, paste0("filter_", id),
                                              selected = new_sel)
-                }, ignoreInit = TRUE)
+                }), ignoreInit = TRUE)
                 obs_list <- c(obs_list, list(obs_an))
             } else if (widget == "selectize") {
                 ## high-cardinality columns use a selectize where EMPTY means
@@ -657,7 +708,9 @@ thanosServer <- function(id, backend,
             }
         }
 
-        observeEvent(input$vars, ignoreNULL = FALSE, {
+        observeEvent(input$vars, ignoreNULL = FALSE, thanos_guard("vars", {
+            ## a non-character value is malformed: keep the last selection
+            if (!is.null(input$vars) && !is.character(input$vars)) return()
             ## whitelist: selectize choices are not enforced by Shiny, so
             ## a client-invented name must never reach the backend
             new_vars <- intersect(input$vars %||% character(0), all_columns)
@@ -705,7 +758,7 @@ thanosServer <- function(id, backend,
             for (v in setdiff(new_vars, old_vars)) add_var(v)
             cache$requested <- new_vars   # the user's word is final
             if (!identical(new_vars, old_vars)) varsNow(new_vars)
-        })
+        }))
 
         ## all leave-one-out masks + the global mask in one pass
         ## (prefix[i] = m1&..&mi, suffix[i] = mi&..&mk,
